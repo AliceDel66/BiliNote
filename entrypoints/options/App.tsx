@@ -16,6 +16,7 @@ import {
   DownloadIcon,
   NotebookPenIcon,
   PlusIcon,
+  SparklesIcon,
   Trash2Icon,
   ZapIcon,
 } from '../../components/icons';
@@ -84,6 +85,7 @@ export default function App() {
   // ---- 偏好开关 ----
   const [autoSync, setAutoSync] = useState(true);
   const [danmaku, setDanmaku] = useState(false);
+  const [chatAutoRecord, setChatAutoRecord] = useState(true);
 
   const [dataBusy, setDataBusy] = useState(false);
 
@@ -93,6 +95,7 @@ export default function App() {
     setActiveId(prefs.activeProfileId ?? p[0]?.id);
     setAutoSync(prefs.autoSyncNotion);
     setDanmaku(prefs.includeDanmaku);
+    setChatAutoRecord(prefs.chatAutoRecord);
     setNotionCfg(notion);
   }, []);
 
@@ -301,6 +304,11 @@ export default function App() {
   const onToggleDanmaku = async (v: boolean) => {
     setDanmaku(v);
     await setPrefs({ includeDanmaku: v });
+  };
+
+  const onToggleChatAutoRecord = async (v: boolean) => {
+    setChatAutoRecord(v);
+    await setPrefs({ chatAutoRecord: v });
   };
 
   // ---- 数据管理（F-08）----
@@ -678,6 +686,22 @@ export default function App() {
                 checked={danmaku}
                 onChange={(v) => void onToggleDanmaku(v)}
                 aria-label="分析时附带弹幕高光上下文"
+              />
+            </div>
+          </Card>
+        </section>
+
+        <section className="space-y-3">
+          <Card>
+            <SectionTitle icon={<SparklesIcon />} title="AI 答疑" />
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-ink-2 dark:text-ink-2-dark">
+                完整回答后自动把问答记录到当前课程笔记（对话页可按课程临时关闭）
+              </p>
+              <Switch
+                checked={chatAutoRecord}
+                onChange={(v) => void onToggleChatAutoRecord(v)}
+                aria-label="自动记录问答到课程笔记"
               />
             </div>
           </Card>

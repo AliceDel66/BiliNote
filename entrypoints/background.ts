@@ -11,7 +11,7 @@ import {
   BiliApiError,
   type VideoInfo,
 } from '../lib/bilibili';
-import { fetchModels, testConnection, LLMError } from '../lib/llm';
+import { chatStream, fetchModels, testConnection, LLMError } from '../lib/llm';
 import {
   createNotionClient,
   syncNoteToNotion,
@@ -22,7 +22,11 @@ import {
   db,
   getCachedSubtitle,
   getCachedSummary,
+  getLatestSummary,
   getPrefs,
+  listNotesByVideo,
+  createNote,
+  saveNote,
   saveSubtitle,
   saveSummary,
   upsertVideo,
@@ -33,13 +37,43 @@ import {
   saveNotionMapping,
   findCoursePageId,
   markNoteSynced,
+  type NoteRow,
   type NotionMappingRow,
 } from '../lib/storage';
+import {
+  appendQaBlock,
+  buildChatContext,
+  buildChatMessages,
+  buildChatNoteInit,
+  createTopic,
+  detectCompleteness,
+  getOrCreateSession,
+  getSession,
+  getSessionByVideo,
+  getTopic,
+  getTurn,
+  getTurnByClientRequestId,
+  addTurn,
+  listTopics,
+  listTurnsByTopic,
+  removeQaBlock,
+  updateSession,
+  updateTopic,
+  updateTurn,
+  type ChatSession,
+  type ChatSnapshot,
+  type ChatTopic,
+  type ChatTurn,
+} from '../lib/chat';
 import { summarize } from '../lib/summarize';
 import {
   ANALYZE_PORT,
+  CHAT_PORT,
   type AnalyzePortMsg,
   type BgRequest,
+  type ChatPortEvent,
+  type ChatPortMsg,
+  type ChatStatePayload,
   type VideoContextInfo,
 } from '../lib/messages';
 
@@ -168,6 +202,311 @@ async function resolveVideoContext(): Promise<VideoContextInfo | null> {
   };
 }
 
+// ---------- AI Chat（在线答疑），讨论稿 §5 / §7 ----------
+
+/** 从 content script 读取一次实时播放秒数（讨论稿 §9.1）；读不到返回 null */
+async function getPlaybackTimeSnapshot(): Promise<number | null> {
+  const tabId = await getActiveTabId();
+  if (!tabId) return null;
+  try {
+    const t = await browser.tabs.sendMessage(tabId, { type: 'getPlaybackTime' });
+    return typeof t === 'number' && Number.isFinite(t) ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Chat 写笔记后广播（Side Panel 用于刷新笔记视图） */
+function broadcastNoteChanged(noteId: number): void {
+  void browser.runtime.sendMessage({ type: 'noteChanged', noteId }).catch(() => {});
+}
+
+/** Chat 自动同步：按笔记 15s 防抖合并，避免每轮问答都触发远端整页替换（§5.6） */
+const chatSyncTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+function scheduleChatSync(noteId: number): void {
+  const prev = chatSyncTimers.get(noteId);
+  if (prev) clearTimeout(prev);
+  chatSyncTimers.set(
+    noteId,
+    setTimeout(() => {
+      chatSyncTimers.delete(noteId);
+      void maybeAutoSync(noteId).catch(() => {});
+    }, 15_000),
+  );
+}
+
+/**
+ * 解析当前 cid 的目标笔记（§10 决策：每 cid 一份，取该 cid 最新笔记；
+ * 没有则自动创建 source=mixed 学习笔记）。成功后回写 session.targetNoteId。
+ */
+async function resolveTargetNote(
+  session: ChatSession,
+  ctx: VideoContextInfo,
+): Promise<NoteRow> {
+  if (session.targetNoteId) {
+    const n = await getNote(session.targetNoteId);
+    if (n) return n;
+  }
+  const hit = (await listNotesByVideo(session.bvid)).find((n) => n.cid === session.cid);
+  if (hit) {
+    await updateSession(session.id, { targetNoteId: hit.id });
+    return hit;
+  }
+  const page = ctx.pages[ctx.p - 1];
+  const partLabel = ctx.pages.length > 1 && page ? `P${ctx.p} ${page.part}` : undefined;
+  const note = await createNote({
+    bvid: session.bvid,
+    cid: session.cid,
+    title: partLabel ? `${ctx.title} · ${partLabel}` : ctx.title,
+    contentMd: buildChatNoteInit({
+      videoTitle: ctx.title,
+      partLabel,
+      owner: ctx.owner,
+      url: `https://www.bilibili.com/${ctx.bvid}${ctx.p > 1 ? `?p=${ctx.p}` : ''}`,
+      generatedAt: new Date(),
+    }),
+    source: 'mixed',
+  });
+  await updateSession(session.id, { targetNoteId: note.id });
+  return note;
+}
+
+/** 完整回答写入本地课程笔记：按最新 revision 幂等追加（§5.6），再广播 + 防抖同步 */
+async function appendTurnToNote(
+  session: ChatSession,
+  turn: ChatTurn,
+  ctx: VideoContextInfo,
+): Promise<NoteRow> {
+  const target = await resolveTargetNote(session, ctx);
+  const latest = await getNote(target.id!);
+  if (!latest) throw new Error('目标笔记不存在');
+  const contentMd = appendQaBlock(latest.contentMd, {
+    chatEntryId: turn.id,
+    anchorTime: turn.anchorTime,
+    question: turn.question,
+    answerMd: turn.answerMd,
+  });
+  await saveNote(latest.id!, { contentMd });
+  await updateTurn(turn.id, { noteWriteStatus: 'written', noteEntryId: turn.id });
+  broadcastNoteChanged(latest.id!);
+  scheduleChatSync(latest.id!);
+  return latest;
+}
+
+/** 撤销 / 不记录：只移除该 chatEntryId 的标记块（不动同期手工编辑），再广播 + 防抖同步 */
+async function removeTurnFromNote(turnId: string, status: 'undone' | 'skipped'): Promise<void> {
+  const turn = await getTurn(turnId);
+  if (!turn) throw new Error('问答不存在');
+  if (turn.noteWriteStatus === 'written') {
+    const topic = await getTopic(turn.topicId);
+    const session = topic ? await getSession(topic.sessionId) : undefined;
+    const note = session?.targetNoteId ? await getNote(session.targetNoteId) : undefined;
+    if (note?.id) {
+      await saveNote(note.id, {
+        contentMd: removeQaBlock(note.contentMd, turn.noteEntryId ?? turn.id),
+      });
+      broadcastNoteChanged(note.id);
+      scheduleChatSync(note.id);
+    }
+  }
+  await updateTurn(turnId, { noteWriteStatus: status });
+}
+
+/** Chat ask 全流程（§6 状态链：准备上下文 → 流式回答 → 保存 Turn → 写笔记 → 触发同步） */
+async function handleChatAsk(
+  port: Browser.runtime.Port,
+  msg: Extract<ChatPortMsg, { type: 'ask' }>,
+  signal: AbortSignal,
+): Promise<void> {
+  const emit = (e: ChatPortEvent) => {
+    try {
+      port.postMessage(e);
+    } catch {
+      /* 面板已关闭 */
+    }
+  };
+  try {
+    // 幂等：同 clientRequestId 已完成 → 直接回放，不再生成/再写笔记（§9.8）
+    const dup = await getTurnByClientRequestId(msg.clientRequestId);
+    if (dup) {
+      if (dup.status !== 'done') {
+        emit({ type: 'error', message: '该问题已提交过，请稍后刷新查看结果' });
+        return;
+      }
+      emit({ type: 'answer-delta', seq: 0, delta: dup.answerMd });
+      emit({ type: 'answer-done', turnId: dup.id, status: 'done' });
+      if (dup.noteWriteStatus === 'written') {
+        const topic = await getTopic(dup.topicId);
+        const session = topic ? await getSession(topic.sessionId) : undefined;
+        const note = session?.targetNoteId ? await getNote(session.targetNoteId) : undefined;
+        if (note?.id) {
+          emit({
+            type: 'note-written',
+            noteId: note.id,
+            noteTitle: note.title,
+            chatEntryId: dup.noteEntryId ?? dup.id,
+          });
+        }
+      }
+      return;
+    }
+
+    // 1. 视频上下文 + 不可变播放快照（§5.2，生成期间不漂移）
+    const ctx = await resolveVideoContext();
+    if (!ctx) {
+      emit({ type: 'error', message: '未检测到 B站视频页，请先在视频播放页提问' });
+      return;
+    }
+    const playbackTime = await getPlaybackTimeSnapshot();
+    const snapshot: ChatSnapshot = {
+      bvid: ctx.bvid,
+      cid: ctx.cid,
+      p: ctx.p,
+      title: ctx.title,
+      playbackTime: playbackTime ?? 0,
+      pageUrl: `https://www.bilibili.com/${ctx.bvid}${ctx.p > 1 ? `?p=${ctx.p}` : ''}`,
+    };
+
+    // 2. 会话 + 话题（连续追问沿用原话题与原始锚点；updateAnchor 重置到当前进度）
+    const session = await getOrCreateSession(ctx.bvid, ctx.cid);
+    let topic: ChatTopic | undefined;
+    if (msg.topicId) {
+      topic = await getTopic(msg.topicId);
+      if (topic && msg.updateAnchor) {
+        await updateTopic(topic.id, { anchorTime: snapshot.playbackTime });
+        topic = { ...topic, anchorTime: snapshot.playbackTime };
+      }
+    }
+    if (!topic) {
+      topic = await createTopic({
+        sessionId: session.id,
+        title: msg.question.trim().split('\n')[0].slice(0, 20) || '新话题',
+        anchorTime: snapshot.playbackTime,
+      });
+    }
+    const anchorTime = topic.anchorTime;
+    const anchoredSnapshot: ChatSnapshot = { ...snapshot, playbackTime: anchorTime };
+
+    // 3. 上下文组装（字幕缓存优先，缺则拉一次；§5.3 预算由 prompt 层控制）
+    let cues = (await getCachedSubtitle(ctx.bvid, ctx.cid))?.cues;
+    if (!cues) {
+      try {
+        const sub = await getSubtitleCues(ctx.bvid, ctx.cid, { aid: ctx.aid });
+        if (sub && sub.cues.length > 0) {
+          await saveSubtitle({
+            bvid: ctx.bvid,
+            cid: ctx.cid,
+            lang: sub.track.lan,
+            source: sub.track.isAi ? 'ai' : 'human',
+            cues: sub.cues,
+            fetchedAt: Date.now(),
+          });
+          cues = sub.cues;
+        }
+      } catch {
+        /* 无字幕：按 none 完整度降级（§5.1） */
+      }
+    }
+    const analysis = (await getLatestSummary(ctx.bvid, ctx.cid))?.result ?? null;
+    const noteForCtx =
+      (session.targetNoteId ? await getNote(session.targetNoteId) : undefined) ??
+      (await listNotesByVideo(ctx.bvid)).find((n) => n.cid === ctx.cid);
+    const recentTurns = (await listTurnsByTopic(topic.id))
+      .filter((t) => t.status === 'done')
+      .slice(-6)
+      .map((t) => ({ question: t.question, answerMd: t.answerMd }));
+    const chatCtx = buildChatContext({
+      snapshot: anchoredSnapshot,
+      cues,
+      analysis,
+      noteContent: noteForCtx?.contentMd,
+      recentTurns,
+    });
+    // toolMode：v1 未接检索服务，auto/force 均降级为仅课程（UI 同步展示降级提示）
+    emit({ type: 'context-ready', snapshot: anchoredSnapshot, completeness: chatCtx.completeness });
+
+    const profile = await getActiveProfile();
+    if (!profile) {
+      emit({
+        type: 'error',
+        message: '尚未配置模型：请先在扩展设置页添加模型服务（baseURL + API Key）',
+      });
+      return;
+    }
+
+    // 4. 落 Turn（streaming；clientRequestId 唯一约束兜底重复提交）
+    let turn: ChatTurn;
+    try {
+      turn = await addTurn({
+        clientRequestId: msg.clientRequestId,
+        topicId: topic.id,
+        question: msg.question,
+        answerMd: '',
+        anchorTime,
+        status: 'streaming',
+        noteWriteStatus: 'pending',
+      });
+    } catch {
+      emit({ type: 'error', message: '该问题已提交过，请勿重复发送' });
+      return;
+    }
+
+    // 5. 流式回答
+    let answer = '';
+    let seq = 0;
+    try {
+      for await (const delta of chatStream({
+        baseURL: profile.baseURL,
+        apiKey: profile.apiKey,
+        model: profile.defaultModel,
+        messages: buildChatMessages(chatCtx, msg.question),
+        signal,
+      })) {
+        answer += delta;
+        emit({ type: 'answer-delta', seq: seq++, delta });
+      }
+    } catch (e) {
+      if (e instanceof LLMError && e.kind === 'aborted') {
+        // 取消：保留已生成文本，但不写笔记（§9.7）
+        await updateTurn(turn.id, { answerMd: answer, status: 'cancelled' });
+        emit({ type: 'answer-done', turnId: turn.id, status: 'cancelled' });
+        return;
+      }
+      const message = errorMessage(e);
+      await updateTurn(turn.id, { answerMd: answer, status: 'error', error: message });
+      emit({ type: 'error', message });
+      return;
+    }
+
+    // 6. 完成：持久化 Turn → 自动记录（全局开关 && 会话开关，§5.6）
+    await updateTurn(turn.id, { answerMd: answer, status: 'done' });
+    emit({ type: 'answer-done', turnId: turn.id, status: 'done' });
+
+    const prefs = await getPrefs();
+    if (prefs.chatAutoRecord && session.autoRecord) {
+      try {
+        const note = await appendTurnToNote(session, { ...turn, answerMd: answer }, ctx);
+        emit({
+          type: 'note-written',
+          noteId: note.id!,
+          noteTitle: note.title,
+          chatEntryId: turn.id,
+        });
+      } catch (e) {
+        // 笔记写入失败：已完成的回答保留，状态分离（§9.11）
+        const message = errorMessage(e);
+        await updateTurn(turn.id, { noteWriteStatus: 'failed', error: message });
+        emit({ type: 'note-write-failed', turnId: turn.id, message });
+      }
+    } else {
+      await updateTurn(turn.id, { noteWriteStatus: 'skipped' });
+    }
+  } catch (e) {
+    emit({ type: 'error', message: errorMessage(e) });
+  }
+}
+
 export default defineBackground(() => {
   // 点击工具栏图标打开侧边栏
   void browser.sidePanel
@@ -238,6 +577,59 @@ export default defineBackground(() => {
           }
           case 'noteSaved': {
             await maybeAutoSync(msg.noteId);
+            sendResponse({ ok: true, data: null });
+            return;
+          }
+          case 'getPlaybackTime': {
+            const t = await getPlaybackTimeSnapshot();
+            sendResponse({ ok: true, data: t });
+            return;
+          }
+          case 'chatGetState': {
+            const session = (await getSessionByVideo(msg.bvid, msg.cid)) ?? null;
+            const topics = session ? await listTopics(session.id) : [];
+            const turnsByTopic: Record<string, ChatTurn[]> = {};
+            for (const t of topics) turnsByTopic[t.id] = await listTurnsByTopic(t.id);
+            const summary = await getLatestSummary(msg.bvid, msg.cid);
+            const sub = summary ? undefined : await getCachedSubtitle(msg.bvid, msg.cid);
+            const payload: ChatStatePayload = {
+              session,
+              topics,
+              turnsByTopic,
+              completeness: detectCompleteness(sub?.cues, summary?.result ?? null),
+            };
+            sendResponse({ ok: true, data: payload });
+            return;
+          }
+          case 'chatUndo': {
+            await removeTurnFromNote(msg.turnId, 'undone');
+            sendResponse({ ok: true, data: null });
+            return;
+          }
+          case 'chatSkip': {
+            await removeTurnFromNote(msg.turnId, 'skipped');
+            sendResponse({ ok: true, data: null });
+            return;
+          }
+          case 'chatRerecord': {
+            const turn = await getTurn(msg.turnId);
+            if (!turn) throw new Error('问答不存在');
+            if (turn.status !== 'done') throw new Error('仅完整回答可以重新记录');
+            const topic = await getTopic(turn.topicId);
+            const session = topic ? await getSession(topic.sessionId) : undefined;
+            if (!session) throw new Error('课程会话不存在');
+            const ctx = await resolveVideoContext();
+            if (!ctx) throw new Error('未检测到 B站视频页，无法定位课程笔记');
+            if (ctx.bvid !== session.bvid || ctx.cid !== session.cid) {
+              throw new Error('请先切换到该问答所属的课程视频，再重新记录');
+            }
+            const note = await appendTurnToNote(session, turn, ctx);
+            sendResponse({ ok: true, data: { noteId: note.id, noteTitle: note.title } });
+            return;
+          }
+          case 'chatSetAutoRecord': {
+            const session = await getOrCreateSession(msg.bvid, msg.cid);
+            await updateSession(session.id, { autoRecord: msg.value });
             sendResponse({ ok: true, data: null });
             return;
           }
@@ -374,6 +766,33 @@ export default defineBackground(() => {
           }
         }
       })();
+    });
+  });
+
+  // ---- AI Chat 流式端口（讨论稿 §7.2）----
+  browser.runtime.onConnect.addListener((port) => {
+    if (port.name !== CHAT_PORT) return;
+
+    let abort: AbortController | null = null;
+    // MV3 SW 保活：长流期间定时触活
+    const keepAlive = setInterval(() => {
+      void browser.runtime.getPlatformInfo().catch(() => {});
+    }, 20000);
+    port.onDisconnect.addListener(() => {
+      clearInterval(keepAlive);
+      abort?.abort();
+    });
+
+    port.onMessage.addListener((raw: ChatPortMsg) => {
+      if (raw.type === 'cancel') {
+        abort?.abort();
+        return;
+      }
+      if (raw.type !== 'ask') return;
+      // 每个 Session 同时只生成 1 个回答（§5.4）：新 ask 先打断上一轮
+      abort?.abort();
+      abort = new AbortController();
+      void handleChatAsk(port, raw, abort.signal);
     });
   });
 });

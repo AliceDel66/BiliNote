@@ -9,6 +9,8 @@ export interface UiPrefs {
   includeDanmaku: boolean;
   /** 笔记保存后是否自动同步到 Notion（PRD F-07） */
   autoSyncNotion: boolean;
+  /** AI Chat 完整回答后是否自动记录到课程笔记（讨论稿 §5.6，默认开） */
+  chatAutoRecord: boolean;
 }
 
 export const DEFAULT_PREFS: UiPrefs = {
@@ -16,6 +18,7 @@ export const DEFAULT_PREFS: UiPrefs = {
   contextBudget: 8000,
   includeDanmaku: false,
   autoSyncNotion: true,
+  chatAutoRecord: true,
 };
 
 /** 内容脚本上报的视频上下文 */

@@ -39,6 +39,9 @@ importers:
       '@wxt-dev/module-react':
         specifier: ^1.2.2
         version: 1.2.2(vite@8.1.5(@types/node@26.1.1)(esbuild@0.27.7)(jiti@2.7.0))(wxt@0.20.27(@types/node@26.1.1)(jiti@2.7.0)(rolldown@1.1.5))
+      fake-indexeddb:
+        specifier: ^6.2.5
+        version: 6.2.5
       tailwindcss:
         specifier: ^4.3.3
         version: 4.3.3
@@ -1011,6 +1014,10 @@ packages:
 
   exsolve@1.1.0:
     resolution: {integrity: sha512-D+42+T12DdIlJM3uepa55qGiL3sYdLBOxIl2ifQCzCHz4c7eiolaHsi3BIqEr7JxBzxv2pYZQX9kw16ziMcEmw==}
+
+  fake-indexeddb@6.2.5:
+    resolution: {integrity: sha512-CGnyrvbhPlWYMngksqrSSUT1BAVP49dZocrHuK0SvtR0D5TMs5wP0o3j7jexDJW01KSadjBp1M/71o/KR3nD1w==}
+    engines: {node: '>=18'}
 
   fast-redact@3.5.0:
     resolution: {integrity: sha512-dwsoQlS7h9hMeYUq1W++23NDcBLV4KqONnITDV9DjfS3q1SgDGVrBdvvTLUotWtPSD7asWDV9/CmsZPy8Hf70A==}
@@ -2887,6 +2894,8 @@ snapshots:
   expect-type@1.4.0: {}
 
   exsolve@1.1.0: {}
+
+  fake-indexeddb@6.2.5: {}
 
   fast-redact@3.5.0: {}
 

@@ -1,8 +1,10 @@
-/** Side Panel 主界面：当前视频卡片 + 一键分析 + 流式结果渲染 + 笔记（F-05） */
+/** Side Panel 主界面：课程 / 对话 / 笔记 三 Tab + 顶部 CourseContextBar（讨论稿 §6） */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { browser } from 'wxt/browser';
 import TimestampLink from '../../components/TimestampLink';
 import MarkdownPreview from '../../components/MarkdownPreview';
+import Tabs, { type TabItem } from '../../components/Tabs';
+import ChatView from './ChatView';
 import {
   Badge,
   Button,
@@ -32,6 +34,7 @@ import { formatTimestamp } from '../../lib/types';
 import {
   createNote,
   deleteNote,
+  getNote,
   listNotesByVideo,
   saveNote,
   type NoteRow,
@@ -40,8 +43,10 @@ import {
 import {
   ANALYZE_PORT,
   type AnalyzePortEvent,
+  type ChatStatePayload,
   type VideoContextInfo,
 } from '../../lib/messages';
+import type { Completeness } from '../../lib/chat';
 import { analysisToMarkdown, type AnalysisResult } from '../../lib/summarize';
 
 type Status =
@@ -52,6 +57,26 @@ type Status =
   | 'done'
   | 'no-subtitle'
   | 'error';
+
+type TabKey = 'course' | 'chat' | 'notes';
+
+const TABS: TabItem<TabKey>[] = [
+  { key: 'course', label: '课程' },
+  { key: 'chat', label: '对话' },
+  { key: 'notes', label: '笔记' },
+];
+
+/** 上下文完整度徽章（讨论稿 §5.1 / §6 CourseContextBar） */
+function completenessBadge(c: Completeness): { text: string; tone: BadgeTone } {
+  switch (c) {
+    case 'full':
+      return { text: '完整分析', tone: 'brand' };
+    case 'partial':
+      return { text: '局部字幕', tone: 'warning' };
+    default:
+      return { text: '无字幕', tone: 'danger' };
+  }
+}
 
 interface ProgressState {
   text: string;
@@ -278,6 +303,105 @@ export default function App() {
 
   useEffect(() => () => void flushDraft(), [flushDraft]);
 
+  // ---- 三 Tab + AI Chat 状态 ----
+  const [activeTab, setActiveTab] = useState<TabKey>('course');
+  const [chatState, setChatState] = useState<ChatStatePayload | null>(null);
+  const [playbackTime, setPlaybackTime] = useState(0);
+
+  const loadChatState = useCallback(async (bvid: string, cid: number) => {
+    try {
+      const resp = await browser.runtime.sendMessage({ type: 'chatGetState', bvid, cid });
+      if (resp?.ok) setChatState(resp.data as ChatStatePayload);
+    } catch {
+      /* background 未就绪 */
+    }
+  }, []);
+
+  const reloadChatState = useCallback(async () => {
+    const c = ctxRef.current;
+    if (c) await loadChatState(c.bvid, c.cid);
+  }, [loadChatState]);
+
+  useEffect(() => {
+    if (ctx?.bvid) void loadChatState(ctx.bvid, ctx.cid);
+    else setChatState(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅随视频/分P 切换刷新
+  }, [ctx?.bvid, ctx?.cid, loadChatState]);
+
+  // 播放时间轮询：仅对话 Tab 激活时每 5s 一次（§6 CourseContextBar）
+  useEffect(() => {
+    if (activeTab !== 'chat' || !ctx?.bvid) return;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const resp = await browser.runtime.sendMessage({ type: 'getPlaybackTime' });
+        if (!stopped && resp?.ok && typeof resp.data === 'number') {
+          setPlaybackTime(resp.data);
+        }
+      } catch {
+        /* 非视频页 */
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 5000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅随 Tab / 视频切换重启轮询
+  }, [activeTab, ctx?.bvid, ctx?.cid]);
+
+  // Chat 写笔记广播：笔记未在编辑时跟随刷新；正在编辑则草稿优先（§9.13 并发两份都保留）
+  useEffect(() => {
+    const listener = (msg: unknown) => {
+      const m = msg as { type?: string; noteId?: number };
+      if (m?.type !== 'noteChanged' || typeof m.noteId !== 'number') return;
+      const c = ctxRef.current;
+      if (c) void loadNotes(c.bvid);
+      if (activeNoteIdRef.current !== m.noteId) return;
+      void refreshSyncInfo(m.noteId);
+      if (draftRef.current !== savedDraftRef.current) return; // 用户有未落盘修改：草稿优先
+      void getNote(m.noteId).then((note) => {
+        if (!note) return;
+        if (activeNoteIdRef.current !== m.noteId) return;
+        if (draftRef.current !== savedDraftRef.current) return;
+        setDraft(note.contentMd);
+        setSavedDraft(note.contentMd);
+      });
+    };
+    browser.runtime.onMessage.addListener(listener);
+    return () => browser.runtime.onMessage.removeListener(listener);
+  }, [loadNotes, refreshSyncInfo]);
+
+  /** 「查看」写入回执：切到笔记 Tab 并打开对应笔记 */
+  const openNotes = useCallback(
+    async (noteId?: number) => {
+      await flushDraft();
+      setActiveTab('notes');
+      if (!noteId || !ctxRef.current) return;
+      await loadNotes(ctxRef.current.bvid);
+      const note = await getNote(noteId);
+      if (!note) return;
+      setActiveNoteId(note.id ?? null);
+      setDraft(note.contentMd);
+      setSavedDraft(note.contentMd);
+      setPreview(true);
+      setSyncInfo(null);
+      if (note.id) void refreshSyncInfo(note.id);
+    },
+    [flushDraft, loadNotes, refreshSyncInfo],
+  );
+
+  const switchTab = (key: TabKey) => {
+    void flushDraft();
+    setActiveTab(key);
+  };
+
+  /** 当前章节：大纲中 time ≤ 播放时间的最近一项（仅有分析结果时展示） */
+  const currentSectionTitle = result?.outline?.length
+    ? result.outline.filter((o) => o.time <= playbackTime).pop()?.title
+    : undefined;
+
   // 切换视频：先落盘当前草稿，再关闭编辑器（避免编辑到别的视频的笔记）
   const prevBvidRef = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -399,7 +523,27 @@ export default function App() {
         </button>
       </header>
 
+      <Tabs tabs={TABS} active={activeTab} onChange={switchTab} />
+
+      {/* CourseContextBar（§6）：分 P + 播放时间 + 当前章节 + 上下文完整度 */}
+      {ctx && status !== 'no-video' && status !== 'loading' && (
+        <div className="flex items-center gap-2 border-b border-line dark:border-line-dark bg-surface-2/60 dark:bg-surface-2-dark/60 px-4 py-2 text-xs text-ink-2 dark:text-ink-2-dark">
+          <Badge tone="brand">P{ctx.p}</Badge>
+          <span className="font-mono tnum">{formatTimestamp(playbackTime)}</span>
+          {currentSectionTitle && (
+            <span className="min-w-0 flex-1 truncate">{currentSectionTitle}</span>
+          )}
+          <span className="ml-auto shrink-0">
+            <Badge tone={completenessBadge(chatState?.completeness ?? 'none').tone}>
+              {completenessBadge(chatState?.completeness ?? 'none').text}
+            </Badge>
+          </span>
+        </div>
+      )}
+
       <main className="p-4 space-y-4">
+        {/* ================= 课程 Tab ================= */}
+        <div className={activeTab === 'course' ? 'space-y-4' : 'hidden'}>
         {status === 'loading' && (
           <p className="text-xs text-ink-2 dark:text-ink-2-dark">加载中…</p>
         )}
@@ -671,7 +815,29 @@ export default function App() {
           </section>
         )}
 
-        {ctx && status !== 'no-video' && status !== 'loading' && (
+        </div>
+
+        {/* ================= 对话 Tab ================= */}
+        <div className={activeTab === 'chat' ? '' : 'hidden'}>
+          {ctx && status !== 'no-video' && status !== 'loading' ? (
+            <ChatView
+              ctx={ctx}
+              chatState={chatState}
+              reloadChatState={reloadChatState}
+              flushDraft={flushDraft}
+              onSeek={seek}
+              onOpenNotes={(noteId) => void openNotes(noteId)}
+            />
+          ) : (
+            <p className="py-12 text-center text-xs text-ink-2 dark:text-ink-2-dark">
+              打开 B站视频播放页后，即可基于当前课程内容提问。
+            </p>
+          )}
+        </div>
+
+        {/* ================= 笔记 Tab ================= */}
+        <div className={activeTab === 'notes' ? 'space-y-4' : 'hidden'}>
+        {ctx && status !== 'no-video' && status !== 'loading' ? (
           <Card>
             <SectionTitle
               icon={<NotebookPenIcon />}
@@ -793,7 +959,12 @@ export default function App() {
               )}
             </div>
           </Card>
+        ) : (
+          <p className="py-12 text-center text-xs text-ink-2 dark:text-ink-2-dark">
+            打开 B站视频播放页后，这里会显示当前课程的笔记。
+          </p>
         )}
+        </div>
       </main>
     </div>
   );

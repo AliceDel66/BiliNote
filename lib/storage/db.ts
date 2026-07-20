@@ -5,6 +5,7 @@
 import Dexie, { type EntityTable } from 'dexie';
 import type { Cue, VideoPage } from '../bilibili/types';
 import type { AnalysisResult } from '../summarize/types';
+import type { ChatSession, ChatTopic, ChatTurn } from '../chat/types';
 
 export interface VideoRow {
   bvid: string;
@@ -83,6 +84,9 @@ export const db = new Dexie('bilinote') as Dexie & {
   notes: EntityTable<NoteRow, 'id'>;
   noteVersions: EntityTable<NoteVersionRow, 'id'>;
   notionMappings: EntityTable<NotionMappingRow, 'id'>;
+  chatSessions: EntityTable<ChatSession, 'id'>;
+  chatTopics: EntityTable<ChatTopic, 'id'>;
+  chatTurns: EntityTable<ChatTurn, 'id'>;
 };
 
 db.version(1).stores({
@@ -96,6 +100,14 @@ db.version(1).stores({
 db.version(2).stores({
   noteVersions: '++id, noteId, createdAt',
   notionMappings: '++id, noteId, syncStatus',
+});
+
+// v3：新增 AI Chat 持久化（纯加表，无数据迁移）。
+// chatSessions 按 [bvid+cid] 唯一；chatTurns.clientRequestId 唯一（重连/重发去重）。
+db.version(3).stores({
+  chatSessions: 'id, &[bvid+cid]',
+  chatTopics: 'id, sessionId',
+  chatTurns: 'id, topicId, &clientRequestId',
 });
 
 // ---------- 便捷读写 ----------
@@ -128,6 +140,15 @@ export async function getCachedSummary(
     .where('[bvid+cid+modelId]')
     .equals([bvid, cid, modelId])
     .first();
+}
+
+/** 当前 cid 最近一次缓存的分析结果（不限模型；AI Chat 上下文用） */
+export async function getLatestSummary(
+  bvid: string,
+  cid: number,
+): Promise<SummaryRow | undefined> {
+  const rows = await db.summaries.where('[bvid+cid]').equals([bvid, cid]).sortBy('createdAt');
+  return rows[rows.length - 1];
 }
 
 export async function saveSummary(row: Omit<SummaryRow, 'id'>): Promise<void> {

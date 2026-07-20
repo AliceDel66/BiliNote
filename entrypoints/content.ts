@@ -68,6 +68,11 @@ export default defineContentScript({
         void seekInPage(msg.seconds, msg.p).then(sendResponse);
         return true;
       }
+      if (msg?.type === 'getPlaybackTime') {
+        // AI Chat 播放快照（讨论稿 §9.1：与播放器误差 ≤1s）
+        sendResponse(document.querySelector('video')?.currentTime ?? null);
+        return false;
+      }
       return false;
     });
   },

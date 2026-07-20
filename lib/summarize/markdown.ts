@@ -18,7 +18,7 @@ function formatDateTime(d: Date): string {
 }
 
 /** 元信息头：引用块（视频 / UP 主与链接 / 生成时间），字段缺失则省略对应段 */
-function metaHeaderLines(meta: NoteMeta): string[] {
+export function metaHeaderLines(meta: NoteMeta): string[] {
   const lines: string[] = [];
   lines.push(`> 视频：${meta.videoTitle}${meta.partLabel ? ` · ${meta.partLabel}` : ''}`);
   const attribution = [
