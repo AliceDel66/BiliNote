@@ -506,40 +506,43 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-page dark:bg-page-dark text-ink dark:text-ink-dark text-[13px]">
-      <header className="sticky top-0 z-10 flex items-center justify-between px-4 py-3 border-b border-line dark:border-line-dark bg-page/75 dark:bg-page-dark/75 backdrop-blur-[12px]">
-        <div className="flex items-center gap-2">
-          <span className="flex h-5 w-5 items-center justify-center rounded-[6px] gradient-brand">
-            <NotebookPenIcon size={12} className="text-white" />
-          </span>
-          <h1 className="text-[15px] font-semibold tracking-tight">BiliNote</h1>
-        </div>
-        <button
-          type="button"
-          onClick={openOptions}
-          title="模型设置"
-          className="flex h-8 w-8 items-center justify-center rounded-full text-ink-2 dark:text-ink-2-dark transition-colors duration-150 hover:bg-surface-2 dark:hover:bg-surface-2-dark cursor-pointer"
-        >
-          <SettingsIcon size={16} />
-        </button>
-      </header>
+      {/* 置顶区：header + Tabs + CourseContextBar 整体吸顶（§6） */}
+      <div className="sticky top-0 z-10 bg-page/75 dark:bg-page-dark/75 backdrop-blur-[12px]">
+        <header className="flex items-center justify-between px-4 py-3">
+          <div className="flex items-center gap-2">
+            <span className="flex h-5 w-5 items-center justify-center rounded-[6px] gradient-brand">
+              <NotebookPenIcon size={12} className="text-white" />
+            </span>
+            <h1 className="text-[15px] font-semibold tracking-tight">BiliNote</h1>
+          </div>
+          <button
+            type="button"
+            onClick={openOptions}
+            title="模型设置"
+            className="flex h-8 w-8 items-center justify-center rounded-full text-ink-2 dark:text-ink-2-dark transition-colors duration-150 hover:bg-surface-2 dark:hover:bg-surface-2-dark cursor-pointer"
+          >
+            <SettingsIcon size={16} />
+          </button>
+        </header>
 
-      <Tabs tabs={TABS} active={activeTab} onChange={switchTab} />
+        <Tabs tabs={TABS} active={activeTab} onChange={switchTab} />
 
-      {/* CourseContextBar（§6）：分 P + 播放时间 + 当前章节 + 上下文完整度 */}
-      {ctx && status !== 'no-video' && status !== 'loading' && (
-        <div className="flex items-center gap-2 border-b border-line dark:border-line-dark bg-surface-2/60 dark:bg-surface-2-dark/60 px-4 py-2 text-xs text-ink-2 dark:text-ink-2-dark">
-          <Badge tone="brand">P{ctx.p}</Badge>
-          <span className="font-mono tnum">{formatTimestamp(playbackTime)}</span>
-          {currentSectionTitle && (
-            <span className="min-w-0 flex-1 truncate">{currentSectionTitle}</span>
-          )}
-          <span className="ml-auto shrink-0">
-            <Badge tone={completenessBadge(chatState?.completeness ?? 'none').tone}>
-              {completenessBadge(chatState?.completeness ?? 'none').text}
-            </Badge>
-          </span>
-        </div>
-      )}
+        {/* CourseContextBar（§6）：分 P + 播放时间 + 当前章节 + 上下文完整度 */}
+        {ctx && status !== 'no-video' && status !== 'loading' && (
+          <div className="flex items-center gap-2 border-b border-line dark:border-line-dark bg-surface-2/60 dark:bg-surface-2-dark/60 px-4 py-2 text-xs text-ink-2 dark:text-ink-2-dark">
+            <Badge tone="brand">P{ctx.p}</Badge>
+            <span className="font-mono tnum">{formatTimestamp(playbackTime)}</span>
+            {currentSectionTitle && (
+              <span className="min-w-0 flex-1 truncate">{currentSectionTitle}</span>
+            )}
+            <span className="ml-auto shrink-0">
+              <Badge tone={completenessBadge(chatState?.completeness ?? 'none').tone}>
+                {completenessBadge(chatState?.completeness ?? 'none').text}
+              </Badge>
+            </span>
+          </div>
+        )}
+      </div>
 
       <main className="p-4 space-y-4">
         {/* ================= 课程 Tab ================= */}
