@@ -152,7 +152,9 @@ describe('appendBlocks 分批（>100 块）', () => {
     await makeClient(fetchImpl).appendBlocks('page-1', blocks);
     expect(calls).toHaveLength(3);
     for (const call of calls) {
-      expect(call.method).toBe('POST');
+      // 回归保护：Notion 追加子块是 PATCH /blocks/{id}/children；
+      // 该路径的 POST 不存在，会返回 400 invalid_request_url
+      expect(call.method).toBe('PATCH');
       expect(call.url).toBe('https://api.notion.com/v1/blocks/page-1/children');
     }
     expect(

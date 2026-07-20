@@ -103,7 +103,7 @@ export interface NotionClient {
   listChildren(blockId: string): Promise<{ id: string }[]>;
   /** DELETE /blocks/{id}：归档（删除）块 */
   archiveBlock(blockId: string): Promise<void>;
-  /** POST /blocks/{id}/children：追加块，超过 100 个自动分批 */
+  /** PATCH /blocks/{id}/children：追加块，超过 100 个自动分批 */
   appendBlocks(pageId: string, blocks: NotionBlock[]): Promise<void>;
 }
 
@@ -302,8 +302,10 @@ export function createNotionClient(opts: NotionClientOptions): NotionClient {
     async appendBlocks(pageId: string, blocks: NotionBlock[]) {
       for (let i = 0; i < blocks.length; i += NOTION_APPEND_BATCH) {
         const batch = blocks.slice(i, i + NOTION_APPEND_BATCH);
+        // 注意：追加子块是 PATCH（Notion 对该路径未定义 POST，
+        // 用 POST 会返回 400 invalid_request_url）
         await request<unknown>(
-          'POST',
+          'PATCH',
           `/blocks/${encodeURIComponent(pageId)}/children`,
           { children: batch },
         );
