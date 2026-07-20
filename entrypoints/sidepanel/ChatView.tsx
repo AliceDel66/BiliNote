@@ -26,7 +26,9 @@ import type { ChatTurn, ToolMode } from '../../lib/chat';
 interface Generating {
   clientRequestId: string;
   question: string;
-  stage: 'preparing' | 'answering';
+  stage: 'preparing' | 'searching' | 'answering';
+  /** tool-start 上报的联网 Provider 名（stage === 'searching' 时展示） */
+  searchProvider?: string;
   partial: string;
 }
 
@@ -42,6 +44,13 @@ const TOOL_MODES: { key: ToolMode; label: string }[] = [
   { key: 'auto', label: '自动拓展' },
   { key: 'force', label: '强制联网' },
 ];
+
+/** 工具模式说明（§5.4：联网使用当前配置模型的原生 websearch 能力，不支持时明确提示） */
+const TOOL_MODE_HINTS: Record<ToolMode, string> = {
+  course: '仅基于当前课程内容回答',
+  auto: '优先课程内容，将尝试使用当前模型联网补充',
+  force: '强制使用模型联网能力，不支持时会报错',
+};
 
 export default function ChatView(props: {
   ctx: VideoContextInfo;
@@ -60,6 +69,7 @@ export default function ChatView(props: {
   const [updateAnchorNext, setUpdateAnchorNext] = useState(false);
   const [toast, setToast] = useState<WrittenToast | null>(null);
   const [error, setError] = useState('');
+  const [toolNotice, setToolNotice] = useState<string | null>(null);
   const [busyTurnId, setBusyTurnId] = useState<string | null>(null);
   const portRef = useRef<Browser.runtime.Port | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -104,6 +114,7 @@ export default function ChatView(props: {
     await props.flushDraft();
     const clientRequestId = crypto.randomUUID();
     setError('');
+    setToolNotice(null);
     setToast(null);
     setInput('');
     setGenerating({ clientRequestId, question, stage: 'preparing', partial: '' });
@@ -116,6 +127,19 @@ export default function ChatView(props: {
     port.onMessage.addListener((e: ChatPortEvent) => {
       switch (e.type) {
         case 'context-ready':
+          setGenerating((g) => (g ? { ...g, stage: 'answering' } : g));
+          break;
+        case 'tool-start':
+          setGenerating((g) =>
+            g ? { ...g, stage: 'searching', searchProvider: e.provider } : g,
+          );
+          break;
+        case 'tool-done':
+          setGenerating((g) => (g ? { ...g, stage: 'answering' } : g));
+          break;
+        case 'tool-failed':
+          // 降级提示保留，随后的课程内回答照常展示
+          setToolNotice(e.message);
           setGenerating((g) => (g ? { ...g, stage: 'answering' } : g));
           break;
         case 'answer-delta':
@@ -373,7 +397,11 @@ export default function ChatView(props: {
             <div className="rounded-[14px] border border-line dark:border-line-dark bg-card dark:bg-card-dark p-3">
               <div className="mb-1 flex items-center justify-between gap-2">
                 <p className="text-[11px] text-ink-3 dark:text-ink-3-dark">
-                  {generating.stage === 'preparing' ? '准备上下文…' : '正在回答…'}
+                  {generating.stage === 'preparing'
+                    ? '准备上下文…'
+                    : generating.stage === 'searching'
+                      ? `正在使用 ${generating.searchProvider ?? '当前模型'} 联网搜索…`
+                      : '正在回答…'}
                 </p>
                 <button
                   type="button"
@@ -397,6 +425,14 @@ export default function ChatView(props: {
           </div>
         )}
       </div>
+
+      {/* 联网降级提示（tool-failed：保留随后的课程内回答） */}
+      {toolNotice && (
+        <p className="flex items-start gap-1.5 rounded-[10px] bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+          <TriangleAlertIcon size={14} className="mt-[1px] shrink-0" />
+          <span>{toolNotice}</span>
+        </p>
+      )}
 
       {error && (
         <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
@@ -441,7 +477,7 @@ export default function ChatView(props: {
         </div>
       )}
 
-      {/* 工具模式三态（§5.4；v1 未接检索服务，非「仅课程」时明确降级提示） */}
+      {/* 工具模式三态（§5.4：联网使用当前模型原生 websearch 能力，不支持时降级或报错） */}
       <div className="space-y-1.5">
         <div className="flex w-fit rounded-lg bg-surface-2 dark:bg-surface-2-dark p-0.5">
           {TOOL_MODES.map((m) => (
@@ -459,11 +495,15 @@ export default function ChatView(props: {
             </button>
           ))}
         </div>
-        {toolMode !== 'course' && (
-          <p className="text-[11px] text-amber-600 dark:text-amber-400">
-            未连接检索服务，本次仅基于课程内容回答
-          </p>
-        )}
+        <p
+          className={`text-[11px] ${
+            toolMode === 'force'
+              ? 'text-amber-600 dark:text-amber-400'
+              : 'text-ink-3 dark:text-ink-3-dark'
+          }`}
+        >
+          {TOOL_MODE_HINTS[toolMode]}
+        </p>
       </div>
 
       {/* 输入行 */}

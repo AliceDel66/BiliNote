@@ -113,6 +113,53 @@ describe('buildChatContext', () => {
     expect(findCurrentSection(analysis, 0)?.title).toBe('开场');
     expect(findCurrentSection(null, 300)).toBeUndefined();
   });
+
+  // ---- 数据边界（ABC 混合 · A 默认 / C 开关）----
+  it('privacy 缺省 = 现状行为（全允许）', () => {
+    const ctx = buildChatContext({
+      snapshot,
+      cues: makeCues(),
+      analysis,
+      noteContent: '笔记',
+    });
+    expect(ctx.subtitleWindow).toContain('[05:00] t10');
+    expect(ctx.noteExcerpt).toBe('笔记');
+    expect(ctx.snapshot.title).toBe(snapshot.title);
+  });
+
+  it('sendSubtitles=false：字幕窗口/大纲/章节/重点全部省略且按 none 降级', () => {
+    const ctx = buildChatContext({
+      snapshot,
+      cues: makeCues(),
+      analysis,
+      privacy: { sendSubtitles: false, sendNoteExcerpt: true, sendPlaybackMeta: true },
+    });
+    expect(ctx.subtitleWindow).toBe('');
+    expect(ctx.compactOutline).toBeUndefined();
+    expect(ctx.currentSection).toBeUndefined();
+    expect(ctx.keyPointsBrief).toBeUndefined();
+    expect(ctx.completeness).toBe('none');
+  });
+
+  it('sendNoteExcerpt=false：不携带笔记摘录', () => {
+    const ctx = buildChatContext({
+      snapshot,
+      noteContent: '私有批注',
+      privacy: { sendSubtitles: true, sendNoteExcerpt: false, sendPlaybackMeta: true },
+    });
+    expect(ctx.noteExcerpt).toBeUndefined();
+  });
+
+  it('sendPlaybackMeta=false：剥离标题与 URL，保留分 P 与播放时间', () => {
+    const ctx = buildChatContext({
+      snapshot,
+      privacy: { sendSubtitles: true, sendNoteExcerpt: true, sendPlaybackMeta: false },
+    });
+    expect(ctx.snapshot.title).toBe('');
+    expect(ctx.snapshot.pageUrl).toBe('');
+    expect(ctx.snapshot.p).toBe(snapshot.p);
+    expect(ctx.snapshot.playbackTime).toBe(snapshot.playbackTime);
+  });
 });
 
 describe('上下文预算裁剪（§5.3：noteExcerpt → keyPointsBrief → outline）', () => {

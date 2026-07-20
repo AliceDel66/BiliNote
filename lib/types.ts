@@ -11,6 +11,12 @@ export interface UiPrefs {
   autoSyncNotion: boolean;
   /** AI Chat 完整回答后是否自动记录到课程笔记（讨论稿 §5.6，默认开） */
   chatAutoRecord: boolean;
+  /** 数据边界（ABC 混合 · A 默认）：允许把当前时间窗口字幕发给模型 */
+  privacySendSubtitles: boolean;
+  /** 数据边界（ABC 混合 · A 默认）：允许把当前笔记摘录发给模型 */
+  privacySendNoteExcerpt: boolean;
+  /** 数据边界（ABC 混合 · A 默认）：允许把播放元信息（标题/URL）发给模型 */
+  privacySendPlaybackMeta: boolean;
 }
 
 export const DEFAULT_PREFS: UiPrefs = {
@@ -19,6 +25,9 @@ export const DEFAULT_PREFS: UiPrefs = {
   includeDanmaku: false,
   autoSyncNotion: true,
   chatAutoRecord: true,
+  privacySendSubtitles: true,
+  privacySendNoteExcerpt: true,
+  privacySendPlaybackMeta: true,
 };
 
 /** 内容脚本上报的视频上下文 */

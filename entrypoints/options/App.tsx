@@ -14,6 +14,7 @@ import {
   CloudUploadIcon,
   DatabaseIcon,
   DownloadIcon,
+  EyeIcon,
   NotebookPenIcon,
   PlusIcon,
   SparklesIcon,
@@ -86,6 +87,10 @@ export default function App() {
   const [autoSync, setAutoSync] = useState(true);
   const [danmaku, setDanmaku] = useState(false);
   const [chatAutoRecord, setChatAutoRecord] = useState(true);
+  // 数据边界（ABC 混合 · C 逐项开关，默认全开 = 最小暴露基线）
+  const [privSubtitles, setPrivSubtitles] = useState(true);
+  const [privNote, setPrivNote] = useState(true);
+  const [privMeta, setPrivMeta] = useState(true);
 
   const [dataBusy, setDataBusy] = useState(false);
 
@@ -96,6 +101,9 @@ export default function App() {
     setAutoSync(prefs.autoSyncNotion);
     setDanmaku(prefs.includeDanmaku);
     setChatAutoRecord(prefs.chatAutoRecord);
+    setPrivSubtitles(prefs.privacySendSubtitles);
+    setPrivNote(prefs.privacySendNoteExcerpt);
+    setPrivMeta(prefs.privacySendPlaybackMeta);
     setNotionCfg(notion);
   }, []);
 
@@ -309,6 +317,20 @@ export default function App() {
   const onToggleChatAutoRecord = async (v: boolean) => {
     setChatAutoRecord(v);
     await setPrefs({ chatAutoRecord: v });
+  };
+
+  // ---- 数据边界（ABC 混合 · C 逐项开关）----
+  const onTogglePrivSubtitles = async (v: boolean) => {
+    setPrivSubtitles(v);
+    await setPrefs({ privacySendSubtitles: v });
+  };
+  const onTogglePrivNote = async (v: boolean) => {
+    setPrivNote(v);
+    await setPrefs({ privacySendNoteExcerpt: v });
+  };
+  const onTogglePrivMeta = async (v: boolean) => {
+    setPrivMeta(v);
+    await setPrefs({ privacySendPlaybackMeta: v });
   };
 
   // ---- 数据管理（F-08）----
@@ -706,6 +728,57 @@ export default function App() {
                 onChange={(v) => void onToggleChatAutoRecord(v)}
                 aria-label="自动记录问答到课程笔记"
               />
+            </div>
+          </Card>
+        </section>
+
+        <section className="space-y-3">
+          <Card>
+            <SectionTitle icon={<EyeIcon />} title="数据边界" />
+            <p className="mb-3 text-xs text-ink-2 dark:text-ink-2-dark">
+              控制答疑时哪些内容可以发送给你配置的模型（默认最小暴露：仅当前问题必需的最小片段）。
+              跨课程笔记与 MCP 知识源等外部数据源接入时，将按「首次使用逐源询问并记住选择」处理。
+            </p>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-ink-2 dark:text-ink-2-dark">
+                  发送当前时间窗口字幕
+                  <span className="block text-xs text-ink-3 dark:text-ink-3-dark">
+                    关闭后课程内容不出本地，答疑按「无字幕」降级回答
+                  </span>
+                </p>
+                <Switch
+                  checked={privSubtitles}
+                  onChange={(v) => void onTogglePrivSubtitles(v)}
+                  aria-label="发送当前时间窗口字幕"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-ink-2 dark:text-ink-2-dark">
+                  发送当前笔记摘录（≤800 字）
+                  <span className="block text-xs text-ink-3 dark:text-ink-3-dark">
+                    仅当前课程的笔记片段，用于结合你的批注回答
+                  </span>
+                </p>
+                <Switch
+                  checked={privNote}
+                  onChange={(v) => void onTogglePrivNote(v)}
+                  aria-label="发送当前笔记摘录"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-ink-2 dark:text-ink-2-dark">
+                  发送播放元信息（视频标题 / 链接）
+                  <span className="block text-xs text-ink-3 dark:text-ink-3-dark">
+                    关闭后模型只知道分 P 与时间点，不知道你在看哪部视频
+                  </span>
+                </p>
+                <Switch
+                  checked={privMeta}
+                  onChange={(v) => void onTogglePrivMeta(v)}
+                  aria-label="发送播放元信息"
+                />
+              </div>
             </div>
           </Card>
         </section>

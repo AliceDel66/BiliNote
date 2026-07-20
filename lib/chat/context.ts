@@ -20,6 +20,25 @@ export interface RecentTurn {
   answerMd: string;
 }
 
+/**
+ * 数据边界开关（ABC 混合策略 · A 默认最小暴露，全 true 即现状行为）。
+ * C 面板在设置页逐源控制；跨域源（MCP 等）落地时走 B 授权记忆流程。
+ */
+export interface PrivacyToggles {
+  /** 允许发送当前时间窗口字幕（关闭后按无字幕降级回答） */
+  sendSubtitles: boolean;
+  /** 允许发送当前笔记摘录 */
+  sendNoteExcerpt: boolean;
+  /** 允许发送播放元信息（视频标题 / 页面 URL） */
+  sendPlaybackMeta: boolean;
+}
+
+export const DEFAULT_PRIVACY: PrivacyToggles = {
+  sendSubtitles: true,
+  sendNoteExcerpt: true,
+  sendPlaybackMeta: true,
+};
+
 export interface ChatContextInput {
   snapshot: ChatSnapshot;
   /** 当前 cid 的完整字幕（无则 undefined） */
@@ -30,6 +49,8 @@ export interface ChatContextInput {
   noteContent?: string;
   /** 当前话题最近若干轮（按时间升序） */
   recentTurns?: RecentTurn[];
+  /** 数据边界开关（默认 A：全允许 = 最小暴露基线） */
+  privacy?: PrivacyToggles;
 }
 
 export interface ChatContext {
@@ -90,17 +111,26 @@ export function detectCompleteness(
 
 export function buildChatContext(input: ChatContextInput): ChatContext {
   const { snapshot, cues, analysis, noteContent, recentTurns } = input;
+  const privacy = input.privacy ?? DEFAULT_PRIVACY;
+  // 字幕开关关闭 = 课程内容整体不出本地：字幕窗口与字幕衍生的大纲/章节/重点全部省略，
+  // 完整度按 none 降级（Prompt 明示无法核对讲师原意）
+  const courseContentAllowed = privacy.sendSubtitles;
   const ctx: ChatContext = {
-    snapshot,
-    subtitleWindow: cues ? selectSubtitleWindow(cues, snapshot.playbackTime) : '',
+    snapshot: privacy.sendPlaybackMeta
+      ? snapshot
+      : { ...snapshot, title: '', pageUrl: '' },
+    subtitleWindow:
+      courseContentAllowed && cues
+        ? selectSubtitleWindow(cues, snapshot.playbackTime)
+        : '',
     recentTurns: (recentTurns ?? []).slice(-RECENT_TURNS_MAX).map((t) => ({
       question: t.question,
       answerMd: t.answerMd.slice(0, RECENT_ANSWER_MAX_CHARS),
     })),
-    completeness: detectCompleteness(cues, analysis),
+    completeness: courseContentAllowed ? detectCompleteness(cues, analysis) : 'none',
   };
 
-  if (analysis && !analysis.rawMarkdown) {
+  if (courseContentAllowed && analysis && !analysis.rawMarkdown) {
     if (analysis.outline.length > 0) {
       ctx.compactOutline = analysis.outline
         .map((o) => `- ${formatTimestamp(o.time)} ${o.title}`)
@@ -114,7 +144,7 @@ export function buildChatContext(input: ChatContextInput): ChatContext {
     }
   }
 
-  if (noteContent) {
+  if (privacy.sendNoteExcerpt && noteContent) {
     const trimmed = noteContent.trim();
     if (trimmed) ctx.noteExcerpt = trimmed.slice(0, NOTE_EXCERPT_MAX_CHARS);
   }

@@ -354,6 +354,7 @@ async function handleChatAsk(
     }
   };
   try {
+    const prefs = await getPrefs();
     // 幂等：同 clientRequestId 已完成 → 直接回放，不再生成/再写笔记（§9.8）
     const dup = await getTurnByClientRequestId(msg.clientRequestId);
     if (dup) {
@@ -449,8 +450,13 @@ async function handleChatAsk(
       analysis,
       noteContent: noteForCtx?.contentMd,
       recentTurns,
+      // 数据边界（ABC 混合 · A 默认）：设置页逐源开关控制发给模型的内容
+      privacy: {
+        sendSubtitles: prefs.privacySendSubtitles,
+        sendNoteExcerpt: prefs.privacySendNoteExcerpt,
+        sendPlaybackMeta: prefs.privacySendPlaybackMeta,
+      },
     });
-    // toolMode：v1 未接检索服务，auto/force 均降级为仅课程（UI 同步展示降级提示）
     emit({ type: 'context-ready', snapshot: anchoredSnapshot, completeness: chatCtx.completeness });
 
     const profile = await getActiveProfile();
@@ -459,6 +465,15 @@ async function handleChatAsk(
         type: 'error',
         message: '尚未配置模型：请先在扩展设置页添加模型服务（baseURL + API Key）',
       });
+      return;
+    }
+
+    // 联网编排（§5.4）：仅使用当前配置模型的原生 websearch 能力（已知 Provider 查表 + 尝试后检测）
+    const webSearchTools = webSearchToolsFor(profile.baseURL);
+    const searchPlan = decideSearchPlan(msg.toolMode, webSearchTools !== null);
+    if (searchPlan === 'unsupported' && msg.toolMode === 'force') {
+      // 强制联网 + Provider 能力未知：不消耗模型调用，直接报硬错误（不降级为仅课程）
+      emit({ type: 'error', message: forceWebSearchUnsupportedMessage(profile) });
       return;
     }
 
@@ -479,19 +494,60 @@ async function handleChatAsk(
       return;
     }
 
-    // 5. 流式回答
+    // 5. 流式回答（按 searchPlan 决定是否带模型原生联网 tools）
     let answer = '';
     let seq = 0;
-    try {
+    const messages = buildChatMessages(chatCtx, msg.question);
+    const streamAnswer = async (tools?: unknown[]) => {
       for await (const delta of chatStream({
         baseURL: profile.baseURL,
         apiKey: profile.apiKey,
         model: profile.defaultModel,
-        messages: buildChatMessages(chatCtx, msg.question),
+        messages,
         signal,
+        ...(tools ? { tools } : {}),
       })) {
         answer += delta;
         emit({ type: 'answer-delta', seq: seq++, delta });
+      }
+    };
+    try {
+      if (searchPlan === 'attempt') {
+        // 已知支持联网的 Provider：带 tools 尝试；被拒（或返回 tool_calls）按模式降级/报错
+        emit({ type: 'tool-start', kind: 'web_search', provider: profile.name });
+        try {
+          await streamAnswer(webSearchTools ?? undefined);
+          emit({ type: 'tool-done', kind: 'web_search' });
+        } catch (e) {
+          const toolUnsupported =
+            e instanceof LLMError &&
+            (e.kind === 'tool_calls' || looksLikeToolUnsupported(e.status, e.message));
+          if (!toolUnsupported) throw e;
+          if (msg.toolMode === 'force') {
+            const message = forceWebSearchUnsupportedMessage(profile);
+            await updateTurn(turn.id, { answerMd: answer, status: 'error', error: message });
+            emit({ type: 'error', message });
+            return;
+          }
+          // 自动拓展：提示后仅基于课程重跑同一问题（§6 外部工具失败降级为课程内回答）
+          emit({
+            type: 'tool-failed',
+            kind: 'web_search',
+            message: '当前模型不支持联网，已仅基于课程回答',
+          });
+          answer = '';
+          await streamAnswer();
+        }
+      } else {
+        if (searchPlan === 'unsupported') {
+          // 自动拓展 + Provider 能力未知：不消耗模型调用探测，提示后直接仅课程回答
+          emit({
+            type: 'tool-failed',
+            kind: 'web_search',
+            message: '当前模型不支持联网，已仅基于课程回答',
+          });
+        }
+        await streamAnswer();
       }
     } catch (e) {
       if (e instanceof LLMError && e.kind === 'aborted') {
@@ -511,7 +567,6 @@ async function handleChatAsk(
     await updateTurn(turn.id, { answerMd: finalAnswer, status: 'done' });
     emit({ type: 'answer-done', turnId: turn.id, status: 'done' });
 
-    const prefs = await getPrefs();
     if (prefs.chatAutoRecord && session.autoRecord) {
       try {
         const note = await appendTurnToNote(session, { ...turn, answerMd: finalAnswer }, ctx);
