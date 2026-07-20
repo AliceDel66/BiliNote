@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createNotionClient,
   NotionError,
+  NOTION_TEXT_LIMIT,
   type NotionBlock,
 } from '../lib/notion';
 
@@ -230,5 +231,48 @@ describe('listChildren 翻页', () => {
     const children = await makeClient(fetchImpl).listChildren('page-1');
     expect(children.map((b) => b.id)).toEqual(['b1', 'b2', 'b3']);
     expect(calls).toHaveLength(2);
+  });
+});
+
+describe('getPage 标题提取', () => {
+  it('返回页面标题与 last_edited_time', async () => {
+    const { fetchImpl, calls } = mockFetch(() =>
+      jsonResp({
+        id: 'p1',
+        last_edited_time: '2026-07-01T00:00:00.000Z',
+        properties: {
+          Name: { type: 'title', title: [{ plain_text: 'P2 · 进程管理' }] },
+        },
+      }),
+    );
+    const page = await makeClient(fetchImpl).getPage('p1');
+    expect(calls[0].method).toBe('GET');
+    expect(calls[0].url).toBe('https://api.notion.com/v1/pages/p1');
+    expect(page.title).toBe('P2 · 进程管理');
+    expect(page.lastEditedTime).toBe('2026-07-01T00:00:00.000Z');
+  });
+});
+
+describe('updatePageTitle', () => {
+  it('PATCH /pages/{id}，body 为 title 属性', async () => {
+    const { fetchImpl, calls } = mockFetch(() => jsonResp({ id: 'p1' }));
+    await makeClient(fetchImpl).updatePageTitle('page-1', 'P2 · 进程管理');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe('PATCH');
+    expect(calls[0].url).toBe('https://api.notion.com/v1/pages/page-1');
+    expect(calls[0].body).toEqual({
+      properties: {
+        title: [{ type: 'text', text: { content: 'P2 · 进程管理' } }],
+      },
+    });
+  });
+
+  it('标题超过 NOTION_TEXT_LIMIT 时裁剪', async () => {
+    const { fetchImpl, calls } = mockFetch(() => jsonResp({ id: 'p1' }));
+    await makeClient(fetchImpl).updatePageTitle('page-1', 'x'.repeat(5000));
+    const titleProp = calls[0].body?.properties as {
+      title: { text: { content: string } }[];
+    };
+    expect(titleProp.title[0].text.content).toHaveLength(NOTION_TEXT_LIMIT);
   });
 });

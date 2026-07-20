@@ -11,7 +11,10 @@ import type { NoteRow, NotionMappingRow } from '../lib/storage';
 function memStorage() {
   const notes = new Map<number, NoteRow>();
   const mappings = new Map<number, NotionMappingRow>();
-  const videos = new Map<string, { title: string; pages: { cid: number; part: string }[] }>();
+  const videos = new Map<
+    string,
+    { title: string; pages: { cid: number; page?: number; part: string }[] }
+  >();
   const storage: SyncStorage = {
     getNote: async (id) => notes.get(id),
     getVideo: async (bvid) => videos.get(bvid),
@@ -54,11 +57,12 @@ function makeNote(patch: Partial<NoteRow>): NoteRow {
 
 // ---------- mock NotionClient ----------
 
-function mockClient(opts?: { editedTime?: string }) {
+function mockClient(opts?: { editedTime?: string; titles?: Record<string, string> }) {
   const calls = {
     createPage: [] as { parentPageId: string; title: string }[],
     archive: [] as string[],
     append: [] as { pageId: string; count: number }[],
+    updatePageTitle: [] as { pageId: string; title: string }[],
   };
   let seq = 0;
   const client: NotionClient = {
@@ -66,11 +70,15 @@ function mockClient(opts?: { editedTime?: string }) {
     searchPages: async () => [],
     getPage: async (id) => ({
       id,
+      title: opts?.titles?.[id] ?? '',
       lastEditedTime: opts?.editedTime ?? new Date(0).toISOString(),
     }),
     createPage: async ({ parentPageId, title }) => {
       calls.createPage.push({ parentPageId, title });
       return { id: `page-${++seq}` };
+    },
+    updatePageTitle: async (pageId, title) => {
+      calls.updatePageTitle.push({ pageId, title });
     },
     listChildren: async () => [{ id: 'old-1' }, { id: 'old-2' }],
     archiveBlock: async (id) => {
@@ -206,6 +214,8 @@ describe('syncNoteToNotion 页面树同步', () => {
     expect(row.error).toContain('冲突');
     expect(calls.archive).toEqual([]);
     expect(calls.append).toEqual([]);
+    // 冲突时不写任何内容，包括页面改名
+    expect(calls.updatePageTitle).toEqual([]);
   });
 
   it('force:true 强制覆盖冲突', async () => {
@@ -329,5 +339,105 @@ describe('syncNoteToNotion 页面树同步', () => {
     expect(calls.createPage).toEqual([
       { parentPageId: 'course-existing', title: 'P1 导论' },
     ]);
+  });
+
+  it('章节页命名：带分 P 号时用「P{n} · 标题」，首次同步不调 updatePageTitle', async () => {
+    const m = memStorage();
+    m.notes.set(1, makeNote({}));
+    m.videos.set('BV1test', {
+      title: '操作系统课程',
+      pages: [
+        { cid: 1, page: 1, part: '导论' },
+        { cid: 2, page: 2, part: '进程管理' },
+      ],
+    });
+    const { client, calls } = mockClient();
+
+    const row = await syncNoteToNotion({
+      client,
+      rootPageId: 'root-1',
+      noteId: 1,
+      storage: m.storage,
+    });
+
+    expect(row.syncStatus).toBe('synced');
+    expect(calls.createPage).toEqual([
+      { parentPageId: 'root-1', title: '操作系统课程' },
+      { parentPageId: 'page-1', title: 'P2 · 进程管理' },
+    ]);
+    // 首次同步：页面刚按期望标题建好，无需改名
+    expect(calls.updatePageTitle).toEqual([]);
+  });
+
+  it('存量 reconcile：复用页面标题与期望不一致 → updatePageTitle 改名', async () => {
+    const m = memStorage();
+    m.notes.set(1, makeNote({ updatedAt: 4500 }));
+    m.videos.set('BV1test', {
+      title: '操作系统课程',
+      pages: [
+        { cid: 1, page: 1, part: '导论' },
+        { cid: 2, page: 2, part: 'slice' },
+      ],
+    });
+    m.mappings.set(1, {
+      noteId: 1,
+      coursePageId: 'course-1',
+      chapterPageId: 'chap-1',
+      lastSyncedAt: 5000,
+      notionLastEditedTime: iso(4000),
+      syncStatus: 'synced',
+    });
+    // 远端章节页仍是旧命名（裸分 P 标题）；课程页标题已一致
+    const { client, calls } = mockClient({
+      editedTime: iso(4000),
+      titles: { 'course-1': '操作系统课程', 'chap-1': 'slice' },
+    });
+
+    const row = await syncNoteToNotion({
+      client,
+      rootPageId: 'root-1',
+      noteId: 1,
+      storage: m.storage,
+    });
+
+    expect(row.syncStatus).toBe('synced');
+    expect(calls.createPage).toEqual([]);
+    expect(calls.updatePageTitle).toEqual([{ pageId: 'chap-1', title: 'P2 · slice' }]);
+  });
+
+  it('存量 reconcile：标题已一致 → 不调 updatePageTitle', async () => {
+    const m = memStorage();
+    m.notes.set(1, makeNote({ updatedAt: 4500 }));
+    m.videos.set('BV1test', {
+      title: '操作系统课程',
+      pages: [
+        { cid: 1, page: 1, part: '导论' },
+        { cid: 2, page: 2, part: '进程管理' },
+      ],
+    });
+    m.mappings.set(1, {
+      noteId: 1,
+      coursePageId: 'course-1',
+      chapterPageId: 'chap-1',
+      lastSyncedAt: 5000,
+      notionLastEditedTime: iso(4000),
+      syncStatus: 'synced',
+    });
+    const { client, calls } = mockClient({
+      editedTime: iso(4000),
+      titles: { 'course-1': '操作系统课程', 'chap-1': 'P2 · 进程管理' },
+    });
+
+    const row = await syncNoteToNotion({
+      client,
+      rootPageId: 'root-1',
+      noteId: 1,
+      storage: m.storage,
+    });
+
+    expect(row.syncStatus).toBe('synced');
+    expect(calls.updatePageTitle).toEqual([]);
+    // 内容照常整页替换
+    expect(calls.append).toEqual([{ pageId: 'chap-1', count: 2 }]);
   });
 });

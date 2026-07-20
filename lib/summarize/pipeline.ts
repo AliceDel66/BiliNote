@@ -14,6 +14,7 @@ import { chunkCues, cuesText, estimateTokens, type CueChunk } from './chunk';
 import { mapPrompt, reducePrompt, repairPrompt } from './prompts';
 import type {
   AnalysisResult,
+  ExtensionItem,
   KeyPoint,
   OutlineItem,
   ProgressEvent,
@@ -84,6 +85,26 @@ function clampTime(v: unknown, duration: number): number | null {
   return Math.floor(seconds);
 }
 
+const EXTENSION_TITLE_LIMIT = 60;
+const EXTENSION_DETAIL_LIMIT = 300;
+
+/** 清洗 extensions / caveats 条目：坏条目丢弃，超长裁剪；缺失/非数组 → []（兼容旧缓存） */
+function parseExtensionItems(raw: unknown): ExtensionItem[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ExtensionItem[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue;
+    const e = item as Record<string, unknown>;
+    if (typeof e.title !== 'string' || !e.title.trim()) continue;
+    if (typeof e.detail !== 'string' || !e.detail.trim()) continue;
+    out.push({
+      title: e.title.trim().slice(0, EXTENSION_TITLE_LIMIT),
+      detail: e.detail.trim().slice(0, EXTENSION_DETAIL_LIMIT),
+    });
+  }
+  return out;
+}
+
 /** 校验并清洗模型输出；时间戳越界的锚点丢弃 */
 export function validateResult(raw: unknown, duration: number): AnalysisResult | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -139,7 +160,13 @@ export function validateResult(raw: unknown, duration: number): AnalysisResult |
   }
 
   if (outline.length === 0 && sections.length === 0) return null;
-  return { outline, sections, keyPoints };
+  return {
+    outline,
+    sections,
+    keyPoints,
+    extensions: parseExtensionItems(obj.extensions),
+    caveats: parseExtensionItems(obj.caveats),
+  };
 }
 
 export async function summarize(
@@ -226,6 +253,8 @@ export async function summarize(
       outline: [],
       sections: [],
       keyPoints: [],
+      extensions: [],
+      caveats: [],
       rawMarkdown: reduceText,
     };
   }

@@ -17,6 +17,7 @@ import {
   CloudUploadIcon,
   FileTextIcon,
   GraduationCapIcon,
+  LightbulbIcon,
   ListTreeIcon,
   NotebookPenIcon,
   OctagonXIcon,
@@ -309,7 +310,7 @@ export default function App() {
     setSyncInfo(null);
   };
 
-  /** 分析完成 → 存为笔记（标题 = 视频标题 + 分P，内容 = 大纲 + 分段总结） */
+  /** 分析完成 → 存为笔记（标题 = 视频标题 + 分P，内容 = 元信息头 + 大纲 + 分段总结等） */
   const saveAsNote = async () => {
     const c = ctxRef.current;
     const r = result;
@@ -321,7 +322,14 @@ export default function App() {
       bvid: c.bvid,
       cid: c.cid,
       title: `${c.title}${part}`,
-      contentMd: analysisToMarkdown(r),
+      contentMd: analysisToMarkdown(r, {
+        videoTitle: c.title,
+        partLabel:
+          c.pages.length > 1 ? `P${c.p} ${c.pages[c.p - 1]?.part ?? ''}` : undefined,
+        owner: c.owner,
+        url: `https://www.bilibili.com/${c.bvid}${c.p > 1 ? `?p=${c.p}` : ''}`,
+        generatedAt: new Date(),
+      }),
       source: 'ai',
     });
     await loadNotes(c.bvid);
@@ -621,6 +629,38 @@ export default function App() {
                               {k.explanation}
                             </p>
                           )}
+                        </li>
+                      ))}
+                    </ul>
+                  </Card>
+                )}
+
+                {(result.extensions?.length ?? 0) > 0 && (
+                  <Card>
+                    <SectionTitle icon={<LightbulbIcon />} title="拓展知识" />
+                    <ul className="space-y-3">
+                      {result.extensions.map((e, i) => (
+                        <li key={i}>
+                          <p className="font-medium">{e.title}</p>
+                          <p className="mt-1 text-xs text-ink-2 dark:text-ink-2-dark">
+                            {e.detail}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  </Card>
+                )}
+
+                {(result.caveats?.length ?? 0) > 0 && (
+                  <Card>
+                    <SectionTitle icon={<TriangleAlertIcon />} title="注意事项" />
+                    <ul className="space-y-3">
+                      {result.caveats.map((e, i) => (
+                        <li key={i}>
+                          <p className="font-medium">{e.title}</p>
+                          <p className="mt-1 text-xs text-ink-2 dark:text-ink-2-dark">
+                            {e.detail}
+                          </p>
                         </li>
                       ))}
                     </ul>

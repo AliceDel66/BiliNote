@@ -18,7 +18,7 @@ export function mapPrompt(
     {
       role: 'system',
       content:
-        '你是课程内容分析助手。基于给定的视频字幕片段，提取 3-6 条要点（bullet），每条一句话，紧扣字幕内容，禁止编造字幕中不存在的信息。只输出要点列表（每行一条，以 "- " 开头），不要输出其他内容。',
+        '你是课程内容分析助手。基于给定的视频字幕片段，提取 3-6 条要点（bullet），每条一句话，紧扣字幕内容，禁止编造字幕中不存在的信息。要点中保留关键术语 / 命令 / 代码符号 / 参数名的原始写法，并留意片中提到的易错点（供后续汇总为注意事项）。只输出要点列表（每行一条，以 "- " 开头），不要输出其他内容。',
     },
     {
       role: 'user',
@@ -33,7 +33,9 @@ ${cuesToTranscript(chunk.cues)}`,
 export const REDUCE_SCHEMA_HINT = `{
   "outline": [{ "title": "章节标题", "time": "mm:ss" }],
   "sections": [{ "title": "小节标题", "start": "mm:ss", "end": "mm:ss", "points": ["要点1", "要点2"] }],
-  "keyPoints": [{ "point": "知识点/难点", "explanation": "面向初学者的讲解", "time": "mm:ss" }]
+  "keyPoints": [{ "point": "知识点/难点", "explanation": "面向初学者的讲解", "time": "mm:ss" }],
+  "extensions": [{ "title": "延伸概念/进阶方向", "detail": "简要说明" }],
+  "caveats": [{ "title": "易错点/常见误区", "detail": "说明与建议" }]
 }`;
 
 /** Reduce 阶段：合并块摘要为全局大纲与分段总结 */
@@ -59,8 +61,11 @@ export function reducePrompt(
 1. 严格输出 JSON（不要 markdown 代码块围栏），Schema 如下：
 ${REDUCE_SCHEMA_HINT}
 2. 时间戳一律使用 mm:ss（超过 1 小时用 h:mm:ss），且必须在 00:00 到 ${formatTimestamp(durationSeconds)} 之间
-3. outline 3-8 条，sections 3-8 段（每段 3-5 条要点），keyPoints 2-6 条
-4. 禁止编造内容中没有出现的知识点`,
+3. outline 3-8 条，sections 3-8 段（每段 4-6 条要点），keyPoints 2-6 条
+4. 分段要点必须保留关键术语 / 命令 / 代码符号 / 参数名的原始写法，并解释「为什么」（原理、动机、适用场景），而不只罗列结论
+5. extensions 2-4 条：拓展知识，指基于公认知识、与本节内容强相关的延伸概念或进阶学习方向；可超出字幕范围，但不确定的宁可不写，禁止编造
+6. caveats 2-4 条：注意事项，指初学者易错点、常见误区、实践建议
+7. 禁止编造内容中没有出现的知识点`,
     },
     {
       role: 'user',

@@ -95,10 +95,12 @@ export interface NotionClient {
   validateToken(): Promise<NotionBotInfo>;
   /** POST /search：按标题搜索页面（仅 page，最多 10 条） */
   searchPages(query: string): Promise<NotionPageSummary[]>;
-  /** GET /pages/{id}：取页面（主要用 last_edited_time 做冲突检测） */
-  getPage(pageId: string): Promise<{ id: string; lastEditedTime: string }>;
+  /** GET /pages/{id}：取页面（标题用于存量页面改名核对，last_edited_time 做冲突检测） */
+  getPage(pageId: string): Promise<{ id: string; title: string; lastEditedTime: string }>;
   /** POST /pages：在指定页面下创建子页面 */
   createPage(params: { parentPageId: string; title: string }): Promise<{ id: string }>;
+  /** PATCH /pages/{id}：修改页面标题（存量章节页命名升级时用） */
+  updatePageTitle(pageId: string, title: string): Promise<void>;
   /** GET /blocks/{id}/children：列出全部子块（自动翻页） */
   listChildren(blockId: string): Promise<{ id: string }[]>;
   /** DELETE /blocks/{id}：归档（删除）块 */
@@ -255,7 +257,11 @@ export function createNotionClient(opts: NotionClientOptions): NotionClient {
         'GET',
         `/pages/${encodeURIComponent(pageId)}`,
       );
-      return { id: json.id ?? pageId, lastEditedTime: json.last_edited_time ?? '' };
+      return {
+        id: json.id ?? pageId,
+        title: pageTitle(json),
+        lastEditedTime: json.last_edited_time ?? '',
+      };
     },
 
     async createPage({ parentPageId, title }) {
@@ -269,6 +275,16 @@ export function createNotionClient(opts: NotionClientOptions): NotionClient {
       });
       if (!json.id) throw new NotionError('bad_response', '创建页面未返回 id');
       return { id: json.id };
+    },
+
+    async updatePageTitle(pageId, title) {
+      await request<unknown>('PATCH', `/pages/${encodeURIComponent(pageId)}`, {
+        properties: {
+          title: [
+            { type: 'text', text: { content: title.slice(0, NOTION_TEXT_LIMIT) } },
+          ],
+        },
+      });
     },
 
     async listChildren(blockId: string) {

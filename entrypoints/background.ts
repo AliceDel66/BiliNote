@@ -62,7 +62,10 @@ const notionSyncStorage: SyncStorage = {
   getVideo: async (bvid) => {
     const v = await db.videos.get(bvid);
     if (!v) return undefined;
-    return { title: v.title, pages: v.parts.map((p) => ({ cid: p.cid, part: p.part })) };
+    return {
+      title: v.title,
+      pages: v.parts.map((p) => ({ cid: p.cid, page: p.page, part: p.part })),
+    };
   },
   getMapping: getNotionMapping,
   saveMapping: saveNotionMapping,
