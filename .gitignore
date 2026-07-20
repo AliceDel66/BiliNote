@@ -3,6 +3,7 @@ PRD.md
 
 # 工具产物
 .codegraph/
+.superdesign/tmp/
 
 # 依赖与构建产物
 node_modules/

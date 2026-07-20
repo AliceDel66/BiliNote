@@ -82,3 +82,39 @@ export async function setPrefs(patch: Partial<UiPrefs>): Promise<UiPrefs> {
   await browser.storage.sync.set({ [PREFS_KEY]: next });
   return next;
 }
+
+// ---------- Notion 集成（内部集成令牌，仅存 chrome.storage.local） ----------
+
+export interface NotionConfig {
+  token: string;
+  /** 验证成功后缓存的集成（bot）名称 */
+  botName?: string;
+  /** 用户选择的同步根页面 */
+  rootPageId?: string;
+  rootPageTitle?: string;
+}
+
+const NOTION_KEY = 'notionConfig';
+
+export async function getNotionConfig(): Promise<NotionConfig | null> {
+  const res = await browser.storage.local.get(NOTION_KEY);
+  return (res[NOTION_KEY] as NotionConfig | undefined) ?? null;
+}
+
+export async function saveNotionConfig(config: NotionConfig): Promise<void> {
+  await browser.storage.local.set({ [NOTION_KEY]: config });
+}
+
+export async function patchNotionConfig(
+  patch: Partial<Omit<NotionConfig, 'token'>>,
+): Promise<NotionConfig | null> {
+  const current = await getNotionConfig();
+  if (!current) return null;
+  const next = { ...current, ...patch };
+  await saveNotionConfig(next);
+  return next;
+}
+
+export async function clearNotionConfig(): Promise<void> {
+  await browser.storage.local.remove(NOTION_KEY);
+}

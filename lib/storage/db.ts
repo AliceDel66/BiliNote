@@ -50,11 +50,39 @@ export interface NoteRow {
   updatedAt: number;
 }
 
+/** 笔记编辑历史（每份笔记保留最近 10 版，PRD F-05） */
+export interface NoteVersionRow {
+  id?: number;
+  noteId: number;
+  contentMd: string;
+  createdAt: number;
+}
+
+export type NotionSyncStatus = 'pending' | 'syncing' | 'synced' | 'error' | 'conflict';
+
+/** 本地笔记 ↔ Notion 页面树映射（PRD 6.3 / F-07） */
+export interface NotionMappingRow {
+  id?: number;
+  noteId: number;
+  /** 课程页（视频标题）；首次同步前可能尚未创建 */
+  coursePageId?: string;
+  /** 章节页（分 P 标题）；单 P 视频无章节页，内容直接写在课程页下 */
+  chapterPageId?: string;
+  /** 上次同步完成时间（本地 ms） */
+  lastSyncedAt: number;
+  /** 上次同步后 Notion 页面的 last_edited_time（ISO 字符串原样保存） */
+  notionLastEditedTime: string;
+  syncStatus: NotionSyncStatus;
+  error?: string;
+}
+
 export const db = new Dexie('bilinote') as Dexie & {
   videos: EntityTable<VideoRow, 'bvid'>;
   subtitles: EntityTable<SubtitleRow, 'id'>;
   summaries: EntityTable<SummaryRow, 'id'>;
   notes: EntityTable<NoteRow, 'id'>;
+  noteVersions: EntityTable<NoteVersionRow, 'id'>;
+  notionMappings: EntityTable<NotionMappingRow, 'id'>;
 };
 
 db.version(1).stores({
@@ -62,6 +90,12 @@ db.version(1).stores({
   subtitles: '++id, &[bvid+cid], bvid',
   summaries: '++id, &[bvid+cid+modelId], [bvid+cid]',
   notes: '++id, bvid, updatedAt',
+});
+
+// v2：新增笔记版本历史与 Notion 同步映射（纯加表，无数据迁移）
+db.version(2).stores({
+  noteVersions: '++id, noteId, createdAt',
+  notionMappings: '++id, noteId, syncStatus',
 });
 
 // ---------- 便捷读写 ----------
@@ -111,4 +145,102 @@ export async function upsertVideo(video: Omit<VideoRow, 'firstSeenAt' | 'lastVie
     firstSeenAt: existing?.firstSeenAt ?? Date.now(),
     lastViewedAt: Date.now(),
   });
+}
+
+// ---------- 笔记（F-05） ----------
+
+const NOTE_VERSIONS_KEEP = 10;
+
+export async function createNote(
+  input: Pick<NoteRow, 'bvid' | 'cid' | 'title' | 'contentMd'> &
+    Partial<Pick<NoteRow, 'template' | 'source'>>,
+): Promise<NoteRow> {
+  const now = Date.now();
+  const row: Omit<NoteRow, 'id'> = {
+    template: 'blank',
+    source: 'manual',
+    ...input,
+    dirty: true,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const id = (await db.notes.add(row)) as number;
+  await db.noteVersions.add({ noteId: id, contentMd: row.contentMd, createdAt: now });
+  return { ...row, id };
+}
+
+/**
+ * 保存笔记内容（自动保存防抖在 UI 侧处理）。内容变化时写入版本历史，
+ * 每份笔记只保留最近 10 版；保存会把笔记标记为 dirty（待同步）。
+ */
+export async function saveNote(
+  id: number,
+  patch: Partial<Pick<NoteRow, 'title' | 'contentMd'>>,
+): Promise<void> {
+  const existing = await db.notes.get(id);
+  if (!existing) throw new Error('笔记不存在');
+  const now = Date.now();
+  const contentChanged =
+    patch.contentMd !== undefined && patch.contentMd !== existing.contentMd;
+  await db.notes.update(id, { ...patch, dirty: true, updatedAt: now });
+  if (contentChanged) {
+    await db.noteVersions.add({ noteId: id, contentMd: patch.contentMd!, createdAt: now });
+    const versions = await db.noteVersions.where('noteId').equals(id).sortBy('createdAt');
+    const excess = versions.length - NOTE_VERSIONS_KEEP;
+    if (excess > 0) {
+      await db.noteVersions.bulkDelete(versions.slice(0, excess).map((v) => v.id!));
+    }
+  }
+}
+
+export async function getNote(id: number): Promise<NoteRow | undefined> {
+  return db.notes.get(id);
+}
+
+export async function listNotesByVideo(bvid: string): Promise<NoteRow[]> {
+  const rows = await db.notes.where('bvid').equals(bvid).sortBy('updatedAt');
+  return rows.reverse();
+}
+
+export async function listNoteVersions(noteId: number): Promise<NoteVersionRow[]> {
+  const rows = await db.noteVersions.where('noteId').equals(noteId).sortBy('createdAt');
+  return rows.reverse();
+}
+
+export async function deleteNote(id: number): Promise<void> {
+  await db.notes.delete(id);
+  await db.noteVersions.where('noteId').equals(id).delete();
+  await db.notionMappings.where('noteId').equals(id).delete();
+}
+
+/** 同步成功后清除 dirty 标记 */
+export async function markNoteSynced(id: number): Promise<void> {
+  await db.notes.update(id, { dirty: false });
+}
+
+// ---------- Notion 同步映射（F-07） ----------
+
+export async function getNotionMapping(noteId: number): Promise<NotionMappingRow | undefined> {
+  return db.notionMappings.where('noteId').equals(noteId).first();
+}
+
+export async function saveNotionMapping(row: NotionMappingRow): Promise<void> {
+  const existing = await db.notionMappings.where('noteId').equals(row.noteId).first();
+  const { id: _omit, ...changes } = row;
+  if (existing) {
+    await db.notionMappings.update(existing.id!, changes);
+  } else {
+    await db.notionMappings.add(row);
+  }
+}
+
+/** 同视频其他笔记已建过的课程页 id（避免每个分 P 各建一棵课程页） */
+export async function findCoursePageId(bvid: string): Promise<string | undefined> {
+  const notes = await db.notes.where('bvid').equals(bvid).primaryKeys();
+  if (notes.length === 0) return undefined;
+  const mapping = await db.notionMappings
+    .where('noteId')
+    .anyOf(notes as number[])
+    .first();
+  return mapping?.coursePageId;
 }

@@ -5,11 +5,17 @@ export interface UiPrefs {
   theme: 'system' | 'light' | 'dark';
   /** 模型上下文预算（token），用于分块 */
   contextBudget: number;
+  /** 分析时是否附带弹幕高光作为辅助上下文（PRD F-02） */
+  includeDanmaku: boolean;
+  /** 笔记保存后是否自动同步到 Notion（PRD F-07） */
+  autoSyncNotion: boolean;
 }
 
 export const DEFAULT_PREFS: UiPrefs = {
   theme: 'system',
   contextBudget: 8000,
+  includeDanmaku: false,
+  autoSyncNotion: true,
 };
 
 /** 内容脚本上报的视频上下文 */

@@ -7,6 +7,7 @@
  * 5. 模型输出非 JSON：一次修复重试，仍失败降级为原文 markdown
  */
 import type { Cue } from '../bilibili/types';
+import type { DanmakuItem } from '../bilibili/danmaku';
 import { chatStream, chatOnce, LLMError, type ChatMessage } from '../llm';
 import { parseTimestamp } from '../types';
 import { chunkCues, cuesText, estimateTokens, type CueChunk } from './chunk';
@@ -28,6 +29,8 @@ export interface SummarizeParams {
   llm: { baseURL: string; apiKey: string; model: string };
   /** 模型上下文预算（token），默认 8000 */
   contextBudget?: number;
+  /** 可选：弹幕采样，作为 reduce 阶段的「弹幕高光」辅助上下文 */
+  danmaku?: DanmakuItem[];
   signal?: AbortSignal;
   onProgress?: (e: ProgressEvent) => void;
   fetchImpl?: typeof fetch;
@@ -197,6 +200,7 @@ export async function summarize(
       params.partTitle ?? '',
       params.duration,
       chunkSummaries,
+      params.danmaku,
     ) as ChatMessage[],
   })) {
     reduceText += delta;

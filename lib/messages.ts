@@ -16,6 +16,8 @@ export interface VideoContextInfo {
   p: number;
   title: string;
   owner: string;
+  /** 视频封面 URL（view 接口 pic 字段，侧边栏 hero 卡缩略图用） */
+  cover?: string;
   /** 当前分 P 的 cid 与时长 */
   cid: number;
   duration: number;
@@ -30,7 +32,12 @@ export type BgRequest =
   | {
       type: 'reportVideoContext';
       context: { bvid: string; p: number; title: string; url: string };
-    };
+    }
+  | { type: 'notionValidateToken'; token: string }
+  | { type: 'notionSearchPages'; query: string }
+  | { type: 'notionSyncNote'; noteId: number; force?: boolean }
+  | { type: 'notionSyncStatus'; noteId: number }
+  | { type: 'noteSaved'; noteId: number };
 
 export type BgResponse<T> = { ok: true; data: T } | { ok: false; error: string };
 

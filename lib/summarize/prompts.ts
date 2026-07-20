@@ -1,5 +1,6 @@
 /** Prompt 模板（版本化，见 PRD 6.4） */
 import type { Cue } from '../bilibili/types';
+import type { DanmakuItem } from '../bilibili/danmaku';
 import { formatTimestamp } from '../types';
 import type { CueChunk } from './chunk';
 
@@ -41,7 +42,15 @@ export function reducePrompt(
   partTitle: string,
   durationSeconds: number,
   chunkSummaries: string[],
+  /** 可选：弹幕采样（F-02），作为「弹幕高光」辅助上下文 */
+  danmaku?: DanmakuItem[],
 ): { role: 'system' | 'user'; content: string }[] {
+  const danmakuSection =
+    danmaku && danmaku.length > 0
+      ? `\n弹幕高光（观众互动较多的片段，仅供定位重点参考，不要当作字幕内容引用）：\n${danmaku
+          .map((d) => `[${formatTimestamp(d.t)}] ${d.text}`)
+          .join('\n')}`
+      : '';
   return [
     {
       role: 'system',
@@ -58,7 +67,7 @@ ${REDUCE_SCHEMA_HINT}
       content: `视频标题：《${videoTitle}》${partTitle ? `\n分P标题：${partTitle}` : ''}
 视频总时长：${formatTimestamp(durationSeconds)}
 各片段要点（按时间顺序）：
-${chunkSummaries.map((s, i) => `【片段 ${i + 1}】\n${s}`).join('\n\n')}`,
+${chunkSummaries.map((s, i) => `【片段 ${i + 1}】\n${s}`).join('\n\n')}${danmakuSection}`,
     },
   ];
 }
