@@ -1,4 +1,4 @@
-# AiStudy
+# BiliNote
 
 **AI 视频学习助手 —— 把 B站变成你的专属 AI 课堂**
 **AI Video Study Assistant — Turn Bilibili into your personal AI classroom**
@@ -14,16 +14,16 @@
 
 ## 简体中文
 
-AiStudy 是一个**开源的浏览器扩展（Chrome / Edge，Manifest V3）**：在 B站看视频时，它自动提取字幕与章节，用你自己配置的 AI 模型生成课程大纲、分段总结和难点讲解，把要点整理成结构化笔记，并一键同步到 Notion —— 让每一次「看视频学习」都真正沉淀为知识。
+BiliNote 是一个**开源的浏览器扩展（Chrome / Edge，Manifest V3）**：在 B站看视频时，它自动提取字幕与章节，用你自己配置的 AI 模型生成课程大纲、分段总结和难点讲解，把要点整理成结构化笔记，并一键同步到 Notion —— 让每一次「看视频学习」都真正沉淀为知识。
 
-### 为什么做 AiStudy
+### 为什么做 BiliNote
 
 - 在 B站学一门课，看完就忘，随手记的笔记散落在微信、备忘录和弹幕里
 - 2 小时的课程视频，真正有价值的也许只有 20 分钟，但没有大纲你找不到它们
 - 通用 AI 助手不知道你「正在看哪个视频、看到第几分几秒」，每次都要复制粘贴上下文
 - 现有工具要么锁定单一模型、要么把数据上传到别人的服务器
 
-AiStudy 的答案：**本地优先、自带密钥（BYOK）、模型自由、笔记进 Notion**。
+BiliNote 的答案：**本地优先、自带密钥（BYOK）、模型自由、笔记进 Notion**。
 
 ### 功能特性
 
@@ -210,8 +210,8 @@ flowchart TB
 前置要求：Node.js ≥ 20，pnpm ≥ 9，Chrome 或 Edge。
 
 ```bash
-git clone https://github.com/<your-username>/AiStudy.git
-cd AiStudy
+git clone https://github.com/AliceDel66/BiliNote.git
+cd BiliNote
 pnpm install
 
 pnpm dev        # 开发模式：自动启动浏览器并热更新
@@ -256,7 +256,7 @@ pnpm zip        # 打包为可分发的 zip
 ### 项目结构（规划）
 
 ```text
-AiStudy/
+BiliNote/
 ├── entrypoints/
 │   ├── background.ts        # Service Worker：消息路由、API 编排
 │   ├── content.ts           # Content Script：B站页面注入与播放器联动
@@ -290,16 +290,16 @@ AiStudy/
 
 ## English
 
-AiStudy is an **open-source browser extension (Chrome / Edge, Manifest V3)**: while you watch videos on Bilibili, it automatically extracts subtitles and chapters, uses your own AI model to generate course outlines, section summaries and explanations, turns them into structured notes, and syncs everything to Notion — so every video you watch becomes knowledge you keep.
+BiliNote is an **open-source browser extension (Chrome / Edge, Manifest V3)**: while you watch videos on Bilibili, it automatically extracts subtitles and chapters, uses your own AI model to generate course outlines, section summaries and explanations, turns them into structured notes, and syncs everything to Notion — so every video you watch becomes knowledge you keep.
 
-### Why AiStudy
+### Why BiliNote
 
 - You finish a course on Bilibili and forget it a week later; your notes are scattered across chat apps and memos
 - In a 2-hour lecture video, maybe 20 minutes really matter to you — but without an outline you can't find them
 - Generic AI assistants don't know *which video you're watching at which timestamp*; you copy-paste context every time
 - Existing tools either lock you into one model or upload your data to someone else's server
 
-AiStudy's answer: **local-first, bring your own key (BYOK), model freedom, notes in Notion**.
+BiliNote's answer: **local-first, bring your own key (BYOK), model freedom, notes in Notion**.
 
 ### Features
 
@@ -486,8 +486,8 @@ flowchart TB
 Prerequisites: Node.js ≥ 20, pnpm ≥ 9, Chrome or Edge.
 
 ```bash
-git clone https://github.com/<your-username>/AiStudy.git
-cd AiStudy
+git clone https://github.com/AliceDel66/BiliNote.git
+cd BiliNote
 pnpm install
 
 pnpm dev        # Dev mode: launches a browser with hot reload
@@ -532,7 +532,7 @@ Manual load: `chrome://extensions` → enable "Developer mode" → "Load unpacke
 ### Project Structure (planned)
 
 ```text
-AiStudy/
+BiliNote/
 ├── entrypoints/
 │   ├── background.ts        # Service Worker: message routing, API orchestration
 │   ├── content.ts           # Content Script: Bilibili page injection, player control
