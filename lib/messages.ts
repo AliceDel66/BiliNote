@@ -93,6 +93,9 @@ export type ChatPortMsg =
 /** Background → Side Panel Chat 端口事件 */
 export type ChatPortEvent =
   | { type: 'context-ready'; snapshot: ChatSnapshot; completeness: Completeness }
+  | { type: 'tool-start'; kind: 'web_search'; provider: string }
+  | { type: 'tool-done'; kind: 'web_search' }
+  | { type: 'tool-failed'; kind: 'web_search'; message: string }
   | { type: 'answer-delta'; seq: number; delta: string }
   | { type: 'answer-done'; turnId: string; status: 'done' | 'cancelled' }
   | { type: 'note-written'; noteId: number; noteTitle: string; chatEntryId: string }

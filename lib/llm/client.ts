@@ -20,6 +20,8 @@ export interface ChatStreamParams extends LLMEndpoint {
   signal?: AbortSignal;
   temperature?: number;
   maxTokens?: number;
+  /** OpenAI 兼容 tools 参数（如 Kimi 内置联网 $web_search），原样透传进请求体 */
+  tools?: unknown[];
   /** 测试注入用 */
   fetchImpl?: typeof fetch;
 }
@@ -99,7 +101,10 @@ export async function testConnection(
 }
 
 interface StreamChunk {
-  choices?: { delta?: { content?: string }; finish_reason?: string | null }[];
+  choices?: {
+    delta?: { content?: string; tool_calls?: unknown };
+    finish_reason?: string | null;
+  }[];
 }
 
 /**
@@ -128,6 +133,7 @@ export async function* chatStream(
         ...(params.maxTokens !== undefined
           ? { max_tokens: params.maxTokens }
           : {}),
+        ...(params.tools !== undefined ? { tools: params.tools } : {}),
       }),
       signal: params.signal,
     });
@@ -161,7 +167,15 @@ export async function* chatStream(
         } catch {
           continue; // 忽略非 JSON keep-alive 行
         }
-        const delta = chunk.choices?.[0]?.delta?.content;
+        const delta0 = chunk.choices?.[0]?.delta;
+        // Provider 请求客户端执行工具（tool_calls）：扩展无法执行，抛错交给上层按「不支持」降级
+        if (delta0?.tool_calls) {
+          throw new LLMError(
+            'tool_calls',
+            '模型返回了客户端工具调用（tool_calls），当前无法执行',
+          );
+        }
+        const delta = delta0?.content;
         if (delta) yield delta;
       }
     }
@@ -170,13 +184,21 @@ export async function* chatStream(
     if (tail.startsWith('data:')) {
       const payload = tail.slice(5).trim();
       if (payload !== '[DONE]') {
+        let chunk: StreamChunk | null = null;
         try {
-          const chunk = JSON.parse(payload) as StreamChunk;
-          const delta = chunk.choices?.[0]?.delta?.content;
-          if (delta) yield delta;
+          chunk = JSON.parse(payload) as StreamChunk;
         } catch {
           /* ignore */
         }
+        const delta0 = chunk?.choices?.[0]?.delta;
+        if (delta0?.tool_calls) {
+          throw new LLMError(
+            'tool_calls',
+            '模型返回了客户端工具调用（tool_calls），当前无法执行',
+          );
+        }
+        const delta = delta0?.content;
+        if (delta) yield delta;
       }
     }
   } finally {

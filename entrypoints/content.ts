@@ -4,6 +4,7 @@
  */
 import { defineContentScript } from 'wxt/utils/define-content-script';
 import { browser } from 'wxt/browser';
+import { parseVideoUrl } from '../lib/bilibili/url';
 
 interface PageContext {
   bvid: string;
@@ -13,12 +14,10 @@ interface PageContext {
 }
 
 function currentContext(): PageContext | null {
-  const m = /\/video\/(BV[0-9A-Za-z]+)/.exec(location.pathname);
-  if (!m) return null;
-  const pParam = Number(new URLSearchParams(location.search).get('p') ?? '1');
-  const p = Number.isFinite(pParam) && pParam >= 1 ? Math.floor(pParam) : 1;
+  const parts = parseVideoUrl(location.href);
+  if (!parts) return null;
   const title = document.title.replace(/_哔哩哔哩_bilibili$/, '').trim();
-  return { bvid: m[1], p, title, url: location.href };
+  return { bvid: parts.bvid, p: parts.p, title, url: location.href };
 }
 
 async function seekInPage(seconds: number, p?: number): Promise<{ jumped: boolean }> {

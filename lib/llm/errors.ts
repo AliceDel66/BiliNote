@@ -6,6 +6,7 @@ export type LLMErrorKind =
   | 'network'
   | 'http'
   | 'aborted'
+  | 'tool_calls'
   | 'bad_response';
 
 export class LLMError extends Error {
@@ -29,6 +30,8 @@ export class LLMError extends Error {
         return '请求超时，请检查网络或稍后重试';
       case 'aborted':
         return '已取消';
+      case 'tool_calls':
+        return '当前模型请求了客户端工具调用（tool_calls），暂不支持执行';
       case 'network':
         return `网络错误：${this.message}，请检查 baseURL 与网络连接`;
       case 'http':

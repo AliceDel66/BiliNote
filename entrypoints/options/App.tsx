@@ -316,7 +316,7 @@ export default function App() {
   const onExport = async () => {
     setDataBusy(true);
     try {
-      const [videos, subtitles, summaries, notes, noteVersions, notionMappings, prefs] =
+      const [videos, subtitles, summaries, notes, noteVersions, notionMappings, chatSessions, chatTopics, chatTurns, prefs] =
         await Promise.all([
           db.videos.toArray(),
           db.subtitles.toArray(),
@@ -324,12 +324,15 @@ export default function App() {
           db.notes.toArray(),
           db.noteVersions.toArray(),
           db.notionMappings.toArray(),
+          db.chatSessions.toArray(),
+          db.chatTopics.toArray(),
+          db.chatTurns.toArray(),
           getPrefs(),
         ]);
       const payload = {
         app: 'bilinote',
         exportedAt: new Date().toISOString(),
-        tables: { videos, subtitles, summaries, notes, noteVersions, notionMappings },
+        tables: { videos, subtitles, summaries, notes, noteVersions, notionMappings, chatSessions, chatTopics, chatTurns },
         prefs,
       };
       const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -731,7 +734,7 @@ export default function App() {
                 </Button>
               </div>
               <p className="text-xs text-ink-2 dark:text-ink-2-dark">
-                导出为 JSON（视频 / 字幕缓存 / 总结 / 笔记 /
+                导出为 JSON（视频 / 字幕缓存 / 总结 / 笔记 / 问答会话 /
                 同步映射与偏好），不包含 API Key 与 Notion
                 令牌。清空操作需二次确认且不可恢复。
               </p>

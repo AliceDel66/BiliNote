@@ -4,6 +4,7 @@
  */
 import { defineBackground } from 'wxt/utils/define-background';
 import { browser } from 'wxt/browser';
+import { parseVideoUrl } from '../lib/bilibili/url';
 import {
   getSubtitleCues,
   getVideoInfo,
@@ -37,6 +38,7 @@ import {
   saveNotionMapping,
   findCoursePageId,
   markNoteSynced,
+  type ModelProfile,
   type NoteRow,
   type NotionMappingRow,
 } from '../lib/storage';
@@ -46,6 +48,7 @@ import {
   buildChatMessages,
   buildChatNoteInit,
   createTopic,
+  decideSearchPlan,
   detectCompleteness,
   getOrCreateSession,
   getSession,
@@ -56,10 +59,13 @@ import {
   addTurn,
   listTopics,
   listTurnsByTopic,
+  looksLikeToolUnsupported,
   removeQaBlock,
+  stripThinking,
   updateSession,
   updateTopic,
   updateTurn,
+  webSearchToolsFor,
   type ChatSession,
   type ChatSnapshot,
   type ChatTopic,
@@ -166,16 +172,32 @@ async function getVideoInfoCached(bvid: string): Promise<VideoInfo> {
   return info;
 }
 
+/** 从 content script 取当前 bvid/p；未注入时补注入重试，再退化为 URL 解析 */
+async function queryPageContext(tabId: number): Promise<{ bvid: string; p: number } | null> {
+  try {
+    return await browser.tabs.sendMessage(tabId, { type: 'queryContext' });
+  } catch {
+    // content script 不存在（扩展安装/重载之前已打开的标签页）：
+    // 先尝试补注入以恢复完整能力（seek / 播放时间）
+    try {
+      await browser.scripting.executeScript({
+        target: { tabId },
+        files: ['/content-scripts/content.js'],
+      });
+      return await browser.tabs.sendMessage(tabId, { type: 'queryContext' });
+    } catch {
+      // 注入失败 → URL 解析兜底（视频上下文可用；seek/播放时间走既有降级路径）
+      const tab = await browser.tabs.get(tabId).catch(() => null);
+      return tab?.url ? parseVideoUrl(tab.url) : null;
+    }
+  }
+}
+
 /** 从 content script 取当前 bvid/p，再合并 view 接口信息 */
 async function resolveVideoContext(): Promise<VideoContextInfo | null> {
   const tabId = await getActiveTabId();
   if (!tabId) return null;
-  let pageCtx: { bvid: string; p: number } | null = null;
-  try {
-    pageCtx = await browser.tabs.sendMessage(tabId, { type: 'queryContext' });
-  } catch {
-    return null; // 非 B站视频页或 content script 未注入
-  }
+  const pageCtx = await queryPageContext(tabId);
   if (!pageCtx?.bvid) return null;
   const info = await getVideoInfoCached(pageCtx.bvid);
   await upsertVideo({
@@ -311,6 +333,11 @@ async function removeTurnFromNote(turnId: string, status: 'undone' | 'skipped'):
     }
   }
   await updateTurn(turnId, { noteWriteStatus: status });
+}
+
+/** 强制联网不可用的硬错误文案（§5.4 强制语义：不降级为仅课程，明确告知无法启用） */
+function forceWebSearchUnsupportedMessage(profile: ModelProfile): string {
+  return `当前配置的模型（${profile.name}/${profile.defaultModel}）不支持联网搜索，无法启用强制联网。可换用支持联网的模型（如 Kimi），或改用「仅课程」/「自动拓展」。`;
 }
 
 /** Chat ask 全流程（§6 状态链：准备上下文 → 流式回答 → 保存 Turn → 写笔记 → 触发同步） */
@@ -479,14 +506,15 @@ async function handleChatAsk(
       return;
     }
 
-    // 6. 完成：持久化 Turn → 自动记录（全局开关 && 会话开关，§5.6）
-    await updateTurn(turn.id, { answerMd: answer, status: 'done' });
+    // 6. 完成：剥离可能的思考过程（推理型模型常见）后持久化 Turn → 自动记录（§5.6）
+    const { answer: finalAnswer } = stripThinking(answer);
+    await updateTurn(turn.id, { answerMd: finalAnswer, status: 'done' });
     emit({ type: 'answer-done', turnId: turn.id, status: 'done' });
 
     const prefs = await getPrefs();
     if (prefs.chatAutoRecord && session.autoRecord) {
       try {
-        const note = await appendTurnToNote(session, { ...turn, answerMd: answer }, ctx);
+        const note = await appendTurnToNote(session, { ...turn, answerMd: finalAnswer }, ctx);
         emit({
           type: 'note-written',
           noteId: note.id!,
