@@ -1,1 +1,146 @@
 @import "tailwindcss";
+
+/* BiliNote Design Tokens（对应 .superdesign/design-system.md v2）
+ * 明暗双主题：dark: variant 跟随系统（Tailwind v4 默认 prefers-color-scheme）。
+ * 命名即语义：bg-page/dark:bg-page-dark、text-ink-2/dark:text-ink-2-dark … */
+@theme {
+  /* brand：indigo→violet 渐变系，单色取 500/600 */
+  --color-brand-300: #a5b4fc;
+  --color-brand-500: #6366f1;
+  --color-brand-600: #4f46e5;
+  --color-brand-700: #4338ca;
+  --color-brand-soft: #eef2ff;
+  --color-brand-soft-dark: rgb(99 102 241 / 0.14);
+  --color-brand-ring: rgb(99 102 241 / 0.25);
+  --color-brand-ring-dark: rgb(99 102 241 / 0.35);
+
+  /* surfaces（slate 冷灰；dark 带蓝调） */
+  --color-page: #f7f8fa;
+  --color-page-dark: #0b0e14;
+  --color-card: #ffffff;
+  --color-card-dark: #12161f;
+  --color-surface-2: #f1f3f7;
+  --color-surface-2-dark: #1b2130;
+
+  /* text */
+  --color-ink: #0f172a;
+  --color-ink-dark: #e2e8f0;
+  --color-ink-2: #64748b;
+  --color-ink-2-dark: #94a3b8;
+  --color-ink-3: #94a3b8;
+  --color-ink-3-dark: #5b6474;
+
+  /* borders（发丝线） */
+  --color-line: rgb(15 23 42 / 0.07);
+  --color-line-dark: rgb(255 255 255 / 0.06);
+  --color-line-2: rgb(15 23 42 / 0.12);
+  --color-line-2-dark: rgb(255 255 255 / 0.1);
+
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@layer utilities {
+  /* 品牌渐变：只用于主 CTA、logo、进度条、tab 指示条 */
+  .gradient-brand {
+    background-image: linear-gradient(135deg, #6366f1, #8b5cf6);
+  }
+  /* light 卡片柔和多层投影 */
+  .card-shadow {
+    box-shadow: 0 1px 2px rgb(15 23 42 / 0.04), 0 8px 24px -12px rgb(15 23 42 / 0.1);
+  }
+  /* dark 卡片顶部 1px 内高光（替代投影），配合 dark: 使用 */
+  .card-highlight {
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
+  }
+  /* 主按钮彩色投影 */
+  .cta-shadow {
+    box-shadow: 0 4px 14px -4px rgb(99 102 241 / 0.5);
+  }
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* ---------- MarkdownPreview 作用域样式（明暗双主题） ---------- */
+.markdown-preview :where(h1, h2, h3) {
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+  margin: 0.75em 0 0.375em;
+}
+.markdown-preview h1 { font-size: 15px; }
+.markdown-preview h2 { font-size: 14px; }
+.markdown-preview h3 { font-size: 13px; }
+.markdown-preview p { margin: 0.375em 0; }
+.markdown-preview :where(ul, ol) {
+  margin: 0.375em 0;
+  padding-left: 1.25em;
+  display: grid;
+  gap: 0.25em;
+}
+.markdown-preview ul { list-style: disc; }
+.markdown-preview ol { list-style: decimal; }
+.markdown-preview li::marker { color: var(--color-ink-3); }
+.markdown-preview code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--color-surface-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.markdown-preview pre {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+.markdown-preview pre code { background: none; padding: 0; font-size: 11.5px; }
+.markdown-preview blockquote {
+  border-left: 3px solid var(--color-line-2);
+  padding-left: 10px;
+  color: var(--color-ink-2);
+  margin: 0.5em 0;
+}
+.markdown-preview a { color: var(--color-brand-500); text-decoration: none; }
+.markdown-preview a:hover { text-decoration: underline; }
+.markdown-preview hr { border: none; border-top: 1px solid var(--color-line); margin: 0.75em 0; }
+/* 预览内的时间戳 = 签名 pill（与 TimestampLink 组件一致） */
+.markdown-preview a[href^="#seek-"] {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: var(--color-brand-soft);
+  color: var(--color-brand-500);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  padding: 3px 8px;
+  line-height: 1;
+}
+.markdown-preview a[href^="#seek-"]:hover { background: var(--color-brand-ring); text-decoration: none; }
+
+@media (prefers-color-scheme: dark) {
+  .markdown-preview :where(h1, h2, h3) { color: var(--color-ink-dark); }
+  .markdown-preview li::marker { color: var(--color-ink-3-dark); }
+  .markdown-preview code { background: var(--color-surface-2-dark); }
+  .markdown-preview pre { background: var(--color-surface-2-dark); border-color: var(--color-line-dark); }
+  .markdown-preview blockquote { border-left-color: var(--color-line-2-dark); color: var(--color-ink-2-dark); }
+  .markdown-preview a { color: var(--color-brand-300); }
+  .markdown-preview hr { border-top-color: var(--color-line-dark); }
+  .markdown-preview a[href^="#seek-"] { background: var(--color-brand-soft-dark); color: var(--color-brand-300); }
+  .markdown-preview a[href^="#seek-"]:hover { background: var(--color-brand-ring-dark); }
+}
+
+/* 结果卡片入场（fade + translateY 6px），配合 animate-[fadeUp_.2s_ease-out] */
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

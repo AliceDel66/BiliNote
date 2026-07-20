@@ -4,9 +4,22 @@
  */
 import { defineBackground } from 'wxt/utils/define-background';
 import { browser } from 'wxt/browser';
-import { getSubtitleCues, getVideoInfo, BiliApiError, type VideoInfo } from '../lib/bilibili';
+import {
+  getSubtitleCues,
+  getVideoInfo,
+  getDanmakuSample,
+  BiliApiError,
+  type VideoInfo,
+} from '../lib/bilibili';
 import { fetchModels, testConnection, LLMError } from '../lib/llm';
 import {
+  createNotionClient,
+  syncNoteToNotion,
+  NotionError,
+  type SyncStorage,
+} from '../lib/notion';
+import {
+  db,
   getCachedSubtitle,
   getCachedSummary,
   getPrefs,
@@ -14,6 +27,13 @@ import {
   saveSummary,
   upsertVideo,
   getActiveProfile,
+  getNote,
+  getNotionConfig,
+  getNotionMapping,
+  saveNotionMapping,
+  findCoursePageId,
+  markNoteSynced,
+  type NotionMappingRow,
 } from '../lib/storage';
 import { summarize } from '../lib/summarize';
 import {
@@ -25,6 +45,7 @@ import {
 
 function errorMessage(e: unknown): string {
   if (e instanceof LLMError) return e.userMessage;
+  if (e instanceof NotionError) return e.userMessage;
   if (e instanceof BiliApiError) return `B站接口错误：${e.message}`;
   return (e as Error).message ?? String(e);
 }
@@ -32,6 +53,69 @@ function errorMessage(e: unknown): string {
 async function getActiveTabId(): Promise<number | null> {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   return tab?.id ?? null;
+}
+
+// ---------- Notion 同步（串行队列，PRD F-07 / 6.5） ----------
+
+const notionSyncStorage: SyncStorage = {
+  getNote,
+  getVideo: async (bvid) => {
+    const v = await db.videos.get(bvid);
+    if (!v) return undefined;
+    return { title: v.title, pages: v.parts.map((p) => ({ cid: p.cid, part: p.part })) };
+  },
+  getMapping: getNotionMapping,
+  saveMapping: saveNotionMapping,
+  findCoursePageId,
+  markNoteClean: markNoteSynced,
+};
+
+async function requireNotionReady(): Promise<{ token: string; rootPageId: string }> {
+  const config = await getNotionConfig();
+  if (!config?.token || !config.rootPageId) {
+    throw new Error('请先在设置页完成 Notion 集成配置（令牌 + 同步根页面）');
+  }
+  return { token: config.token, rootPageId: config.rootPageId };
+}
+
+async function doSyncNote(noteId: number, force?: boolean): Promise<NotionMappingRow> {
+  const { token, rootPageId } = await requireNotionReady();
+  const client = createNotionClient({ token });
+  return syncNoteToNotion({
+    client,
+    rootPageId,
+    noteId,
+    force,
+    storage: notionSyncStorage,
+  });
+}
+
+// 所有同步任务经同一队列串行执行（配合客户端限流，避免突发请求打满 3 QPS）
+let syncChain: Promise<unknown> = Promise.resolve();
+
+function enqueueSync(noteId: number, force?: boolean): Promise<NotionMappingRow> {
+  const job = syncChain.then(() => doSyncNote(noteId, force));
+  syncChain = job.catch(() => undefined);
+  return job;
+}
+
+/** 笔记保存后的自动同步（prefs.autoSyncNotion，默认开） */
+async function maybeAutoSync(noteId: number): Promise<void> {
+  const prefs = await getPrefs();
+  if (!prefs.autoSyncNotion) return;
+  const config = await getNotionConfig();
+  if (!config?.token || !config.rootPageId) return; // 未配置 Notion：保持「未同步」
+  const existing = await getNotionMapping(noteId);
+  await saveNotionMapping({
+    ...(existing ?? {
+      noteId,
+      lastSyncedAt: 0,
+      notionLastEditedTime: '',
+    }),
+    syncStatus: 'pending',
+    error: undefined,
+  });
+  await enqueueSync(noteId);
 }
 
 // 视频信息内存缓存（5min），供侧边栏轮询低成本刷新
@@ -74,6 +158,7 @@ async function resolveVideoContext(): Promise<VideoContextInfo | null> {
     p,
     title: info.title,
     owner: info.owner,
+    cover: info.cover,
     cid: page?.cid ?? 0,
     duration: page?.duration ?? info.duration,
     pages: info.pages,
@@ -121,6 +206,35 @@ export default defineBackground(() => {
             return;
           }
           case 'reportVideoContext': {
+            sendResponse({ ok: true, data: null });
+            return;
+          }
+          case 'notionValidateToken': {
+            const client = createNotionClient({ token: msg.token });
+            const info = await client.validateToken();
+            sendResponse({ ok: true, data: info });
+            return;
+          }
+          case 'notionSearchPages': {
+            const config = await getNotionConfig();
+            if (!config?.token) throw new Error('请先保存 Notion 令牌');
+            const client = createNotionClient({ token: config.token });
+            const pages = await client.searchPages(msg.query);
+            sendResponse({ ok: true, data: pages });
+            return;
+          }
+          case 'notionSyncNote': {
+            const mapping = await enqueueSync(msg.noteId, msg.force);
+            sendResponse({ ok: true, data: mapping });
+            return;
+          }
+          case 'notionSyncStatus': {
+            const mapping = await getNotionMapping(msg.noteId);
+            sendResponse({ ok: true, data: mapping ?? null });
+            return;
+          }
+          case 'noteSaved': {
+            await maybeAutoSync(msg.noteId);
             sendResponse({ ok: true, data: null });
             return;
           }
@@ -215,6 +329,18 @@ export default defineBackground(() => {
           }
 
           const prefs = await getPrefs();
+
+          // 可选：弹幕高光作为辅助上下文（F-02，默认关；失败不影响主流程）
+          let danmaku: { t: number; text: string }[] | undefined;
+          if (prefs.includeDanmaku) {
+            try {
+              const dm = await getDanmakuSample(cid);
+              if (dm.samples.length > 0) danmaku = dm.samples.slice(0, 50);
+            } catch {
+              /* 弹幕拉取失败不阻塞分析 */
+            }
+          }
+
           const result = await summarize({
             cues,
             duration,
@@ -226,6 +352,7 @@ export default defineBackground(() => {
               model: profile.defaultModel,
             },
             contextBudget: prefs.contextBudget,
+            danmaku,
             signal,
             onProgress: (e) => {
               try {
