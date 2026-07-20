@@ -1,0 +1,8 @@
+# pnpm 11+: 允许以下依赖执行安装构建脚本
+allowBuilds:
+  esbuild: true
+  spawn-sync: true
+# pnpm 10 及以下兼容
+onlyBuiltDependencies:
+  - esbuild
+  - spawn-sync

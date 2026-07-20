@@ -1,0 +1,31 @@
+{
+  "name": "bilinote",
+  "version": "0.1.0",
+  "description": "BiliNote — AI 视频学习助手，把 B站变成你的专属 AI 课堂",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "compile": "wxt prepare && tsc --noEmit",
+    "test": "vitest run",
+    "verify:bili": "node scripts/verify-bili.mjs"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.2.0",
+    "dexie": "^4.4.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@wxt-dev/module-react": "^1.2.2",
+    "tailwindcss": "^4.3.3",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.10",
+    "wxt": "^0.20.27"
+  }
+}

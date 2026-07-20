@@ -1,6 +1,9 @@
 # 内部文档（不提交 git）
 PRD.md
 
+# 工具产物
+.codegraph/
+
 # 依赖与构建产物
 node_modules/
 .output/
