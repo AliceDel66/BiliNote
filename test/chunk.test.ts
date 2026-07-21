@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { chunkCues, cuesText, estimateTokens } from '../lib/summarize/chunk';
-import { extractJson, validateResult } from '../lib/summarize/pipeline';
+import { extractJson, stripThinkTags, validateResult } from '../lib/summarize/pipeline';
 import type { Cue } from '../lib/bilibili/types';
 
 function makeCues(count: number, charsPerCue: number, stepSeconds = 2): Cue[] {
@@ -103,5 +103,32 @@ describe('extractJson / validateResult', () => {
   it('完全非 JSON 抛错（由管线走修复/降级）', () => {
     expect(() => extractJson('这不是 JSON')).toThrow();
     expect(validateResult({ outline: [], sections: [] }, 100)).toBeNull();
+  });
+
+  it('剥离 <think> 思考块后提取 JSON（推理模型典型输出）', () => {
+    const raw = extractJson(
+      '<think>The user wants me to act as a course analysis assistant. I need to: 1. Generate JSON with schema {"outline":[]} 2. …</think>\n\n```json\n{"outline":[{"title":"开场","time":"01:00"}],"sections":[],"keyPoints":[]}\n```',
+    );
+    const result = validateResult(raw, 600);
+    expect(result?.outline).toEqual([{ title: '开场', time: 60 }]);
+  });
+
+  it('think 块内含花括号也不干扰（先剥 think 再找围栏）', () => {
+    const raw = extractJson(
+      '<think>Let me plan: {"wrong": true} should not win…</think>\n{"outline":[{"title":"正确","time":0}],"sections":[],"keyPoints":[]}',
+    ) as { outline: { title: string }[] };
+    expect(raw.outline[0].title).toBe('正确');
+  });
+
+  it('未闭合 think 块截断到 JSON 起点', () => {
+    const raw = extractJson(
+      '<think>planning without closing tag…\n{"outline":[{"title":"恢复","time":0}],"sections":[],"keyPoints":[]}',
+    ) as { outline: { title: string }[] };
+    expect(raw.outline[0].title).toBe('恢复');
+  });
+
+  it('stripThinkTags：孤立标签与多块清理', () => {
+    expect(stripThinkTags('<think>a</think>正文</think>')).toBe('正文');
+    expect(stripThinkTags('x<think>a</think>y<think>b</think>z')).toBe('xyz');
   });
 });

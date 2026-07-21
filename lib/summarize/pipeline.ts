@@ -59,9 +59,27 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-/** 从模型输出中提取 JSON（容忍 ```json 围栏与前后杂文本） */
+/**
+ * 剥离推理型模型输出的 <think>…</think> 思考块（含未闭合/孤立标签）。
+ * 推理模型常把 CoT 包在 think 标签里再输出 JSON，不剥掉会让 JSON 提取抓错起点。
+ */
+export function stripThinkTags(text: string): string {
+  let t = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  // 未闭合的 think 块：其后若出现 JSON 起点（围栏或独占行 {），截断到该处；否则整段丢弃
+  const open = t.search(/<think>/i);
+  if (open >= 0) {
+    const rest = t.slice(open + 7);
+    const fenceIdx = rest.search(/```/);
+    const braceLine = rest.search(/^\s*\{/m);
+    const cut = [fenceIdx, braceLine].filter((i) => i >= 0).sort((a, b) => a - b)[0];
+    t = (t.slice(0, open) + (cut !== undefined ? rest.slice(cut) : '')).trim();
+  }
+  return t.replace(/<\/?think>/gi, '').trim();
+}
+
+/** 从模型输出中提取 JSON（容忍 <think> 思考块、```json 围栏与前后杂文本） */
 export function extractJson(text: string): unknown {
-  let t = text.trim();
+  let t = stripThinkTags(text);
   const fence = /```(?:json)?\s*([\s\S]*?)```/.exec(t);
   if (fence) t = fence[1].trim();
   try {
