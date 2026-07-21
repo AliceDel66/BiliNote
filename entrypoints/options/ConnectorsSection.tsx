@@ -160,10 +160,11 @@ function NotionConfigForm({ onChanged }: { onChanged: () => Promise<void> }) {
     try {
       await requestOriginQuiet(['https://api.notion.com/*']);
       const info = (await callBg({ type: 'notionValidateToken', token })) as {
+        id: string;
         botName: string;
         workspaceName?: string;
       };
-      await saveNotionConfig({ token, botName: info.botName });
+      await saveNotionConfig({ token, botName: info.botName, botId: info.id });
       // 令牌就绪后确保存在 notion profile（添加路径下自动落一条）
       const profiles = await listConnectorProfiles();
       if (!profiles.some((p) => p.kind === 'notion')) {
