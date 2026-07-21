@@ -19,6 +19,7 @@ import {
   buildConnector,
   getActiveConnectorProfile,
   getTargetSyncRow,
+  listImaKnowledgeBases,
   listConnectorProfiles,
   getActiveConnectorProfileId,
   syncNoteToTarget,
@@ -94,6 +95,14 @@ import {
 function errorMessage(e: unknown): string {
   if (e instanceof LLMError) return e.userMessage;
   if (e instanceof NotionError) return e.userMessage;
+  if (
+    e &&
+    typeof e === 'object' &&
+    (e as { name?: unknown }).name === 'ImaError' &&
+    typeof (e as { userMessage?: unknown }).userMessage === 'string'
+  ) {
+    return (e as { userMessage: string }).userMessage;
+  }
   if (e instanceof BiliApiError) return `B站接口错误：${e.message}`;
   return (e as Error).message ?? String(e);
 }
@@ -722,6 +731,14 @@ export default defineBackground(() => {
             const connector = buildConnector(msg.profile);
             const result = await connector.testConnection();
             sendResponse({ ok: true, data: result });
+            return;
+          }
+          case 'imaListKnowledgeBases': {
+            const knowledgeBases = await listImaKnowledgeBases({
+              clientId: msg.clientId,
+              apiKey: msg.apiKey,
+            });
+            sendResponse({ ok: true, data: knowledgeBases });
             return;
           }
           case 'connectorList': {

@@ -48,6 +48,7 @@ export type BgRequest =
   | { type: 'notionSyncNote'; noteId: number; force?: boolean }
   | { type: 'notionSyncStatus'; noteId: number }
   | { type: 'connectorTest'; profile: ConnectorProfile }
+  | { type: 'imaListKnowledgeBases'; clientId: string; apiKey: string }
   | { type: 'connectorList' }
   | { type: 'connectorSyncStatus'; noteId: number }
   | { type: 'noteSaved'; noteId: number }

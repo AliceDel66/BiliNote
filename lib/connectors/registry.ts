@@ -9,6 +9,7 @@
 import { browser } from 'wxt/browser';
 import { getNotionConfig } from '../storage/settings';
 import { createNotionConnector } from './notionConnector';
+import { createImaConnector } from './imaConnector';
 import { createMcpConnector } from './mcpConnector';
 import { createBridgeConnector } from './bridgeConnector';
 import {
@@ -178,6 +179,8 @@ export function buildConnector(
   switch (profile.kind) {
     case 'notion':
       return createNotionConnector(profile, deps);
+    case 'ima':
+      return createImaConnector(profile, deps);
     case 'remote-mcp':
     case 'custom-mcp':
     case 'local-mcp':

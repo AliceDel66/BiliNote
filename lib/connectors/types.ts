@@ -7,7 +7,13 @@
  * - MCP 是扩展边界，不是统一数据模型 —— 连接器只做能力映射（create/append/update 等）。
  */
 
-export type ConnectorKind = 'notion' | 'remote-mcp' | 'custom-mcp' | 'local-bridge' | 'local-mcp';
+export type ConnectorKind =
+  | 'notion'
+  | 'ima'
+  | 'remote-mcp'
+  | 'custom-mcp'
+  | 'local-bridge'
+  | 'local-mcp';
 
 /** stable = 官方预设/成熟路径；beta = 能力以端点实际返回为准；custom = 用户自建端点 */
 export type ConnectorStatus = 'stable' | 'beta' | 'custom';
@@ -30,10 +36,11 @@ export const DEFAULT_LOCAL_MCP_PORT = 27184;
 
 /**
  * 连接器配置档案。token 等凭据直接放在 config 内（chrome.storage.local，永不同步），
- * 唯二例外：kind === 'notion' 时 config = { binding: 'notionConfig' }，凭据沿用既有
+ * 例外：kind === 'notion' 时 config = { binding: 'notionConfig' }，凭据沿用既有
  * NotionConfig 存储（迁移不复制 token）。
  *
  * config 约定（按 kind）：
+ * - ima：{ clientId, apiKey, knowledgeBaseId, knowledgeBaseName }
  * - remote-mcp / custom-mcp：{ endpoint, token?, authScheme? }
  * - local-mcp：{ port, token }（端点固定为 http://127.0.0.1:<port>/mcp，token 即 bridge token）
  * - local-bridge：{ port, token }
@@ -89,6 +96,12 @@ export const CONNECTOR_KIND_INFO: Record<
     defaultName: 'Notion（官方预设）',
     desc: '官方内部集成：课程 / 章节页面树，整页替换同步',
   },
+  ima: {
+    label: 'ima',
+    status: 'beta',
+    defaultName: 'ima 知识库（Beta）',
+    desc: '官方 OpenAPI：Markdown 笔记新建与增量追加，写入指定 ima 知识库',
+  },
   'remote-mcp': {
     label: 'Remote MCP',
     status: 'beta',
@@ -102,10 +115,10 @@ export const CONNECTOR_KIND_INFO: Record<
     desc: '连接任意公网 HTTPS MCP 端点（保存时申请域名权限）',
   },
   'local-bridge': {
-    label: 'Local Markdown Bridge',
+    label: 'Obsidian',
     status: 'stable',
-    defaultName: '本地 Markdown 库',
-    desc: '经本机 bridge 写入 Obsidian / Logseq / 纯 Markdown 文件夹',
+    defaultName: 'Obsidian Vault',
+    desc: '经本机 bridge 写入 Obsidian Vault，Markdown 文件保留在本地',
   },
   'local-mcp': {
     label: 'Local MCP',
@@ -117,7 +130,14 @@ export const CONNECTOR_KIND_INFO: Record<
 
 /** 设置页「添加连接」目录卡的预设（一个 kind 可对应多个预设，如 remote-mcp = 腾讯文档 / 飞书文档） */
 export interface ConnectorPreset {
-  id: 'notion' | 'tencent-docs' | 'feishu-docs' | 'custom-mcp' | 'local-bridge' | 'yuque';
+  id:
+    | 'notion'
+    | 'ima'
+    | 'tencent-docs'
+    | 'feishu-docs'
+    | 'custom-mcp'
+    | 'obsidian'
+    | 'yuque';
   kind: ConnectorKind;
   label: string;
   status: ConnectorStatus;
@@ -125,7 +145,7 @@ export interface ConnectorPreset {
   desc: string;
 }
 
-/** 目录卡展示顺序（2 列网格，3×2） */
+/** 目录卡展示顺序（2 列网格） */
 export const CONNECTOR_PRESETS: ConnectorPreset[] = [
   {
     id: 'notion',
@@ -134,6 +154,14 @@ export const CONNECTOR_PRESETS: ConnectorPreset[] = [
     status: 'stable',
     defaultName: 'Notion（官方预设）',
     desc: '官方内部集成：课程 / 章节页面树，整页替换同步',
+  },
+  {
+    id: 'ima',
+    kind: 'ima',
+    label: 'ima',
+    status: 'beta',
+    defaultName: 'ima 知识库（Beta）',
+    desc: '官方 OpenAPI：选择可写知识库，保存课程 Markdown 笔记',
   },
   {
     id: 'tencent-docs',
@@ -160,12 +188,12 @@ export const CONNECTOR_PRESETS: ConnectorPreset[] = [
     desc: '连接任意公网 HTTPS MCP 端点（保存时申请域名权限）',
   },
   {
-    id: 'local-bridge',
+    id: 'obsidian',
     kind: 'local-bridge',
-    label: 'Local Markdown Bridge',
+    label: 'Obsidian',
     status: 'stable',
-    defaultName: '本地 Markdown 库',
-    desc: '经本机 bridge 写入 Obsidian / Logseq / 纯 Markdown 文件夹',
+    defaultName: 'Obsidian Vault',
+    desc: '经本机 bridge 写入 Obsidian Vault，Markdown 文件保留在本地',
   },
   {
     id: 'yuque',

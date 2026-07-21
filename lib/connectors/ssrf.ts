@@ -60,7 +60,7 @@ export function assertPublicHttpsUrl(raw: string): URL {
     throw new Error('端点必须使用 https:// 协议（自定义 MCP 仅允许加密连接）');
   }
   if (isBlockedHost(url.hostname)) {
-    throw new Error('端点指向本机或内网地址，已被安全策略拦截；本机服务请改用 Local Markdown Bridge');
+    throw new Error('端点指向本机或内网地址，已被安全策略拦截；本机服务请改用 Obsidian / Local Bridge');
   }
   return url;
 }

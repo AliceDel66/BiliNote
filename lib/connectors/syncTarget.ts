@@ -54,7 +54,7 @@ export async function syncNoteToTarget(
 ): Promise<TargetSyncRow> {
   const profile = await getActiveConnectorProfile();
   if (!profile) {
-    throw new Error('请先在设置页配置知识库连接（Notion / 腾讯文档 / MCP / 本地 Markdown）');
+    throw new Error('请先在设置页配置知识库连接（Notion / ima / 腾讯文档 / MCP / Obsidian）');
   }
 
   // ---- Notion：既有路径原样委托 ----
