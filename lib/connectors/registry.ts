@@ -13,6 +13,7 @@ import { createMcpConnector } from './mcpConnector';
 import { createBridgeConnector } from './bridgeConnector';
 import {
   CONNECTOR_KIND_INFO,
+  TENCENT_DOCS_MCP_ENDPOINT,
   type ConnectorDeps,
   type ConnectorProfile,
   type KnowledgeConnector,
@@ -21,6 +22,7 @@ import {
 const PROFILES_KEY = 'connectorProfiles';
 const ACTIVE_KEY = 'connectorActiveId';
 const MIGRATION_KEY = 'connectorMigrationDone';
+const MIGRATION_V2_KEY = 'connectorMigrationV2';
 
 async function rawList(): Promise<ConnectorProfile[]> {
   const res = await browser.storage.local.get(PROFILES_KEY);
@@ -54,8 +56,40 @@ async function ensureMigration(): Promise<void> {
   await browser.storage.local.set({ [MIGRATION_KEY]: true });
 }
 
+/**
+ * V2 迁移（幂等，additive）：本次升级前创建的腾讯文档 remote-mcp profile 没有
+ * 官方端点与鉴权方式 —— endpoint 为空时补官方 URL（docs.qq.com/openapi/mcp），
+ * 缺 authScheme 时补 'raw'（腾讯文档官方要求 Authorization 头直接放原始 token、
+ * 不加 Bearer 前缀）。用户已填写的字段一律不覆盖；connectorMigrationV2 标记
+ * 保证只跑一次（之后的用户修改不会被回改）。
+ */
+async function ensureMigrationV2(): Promise<void> {
+  const res = await browser.storage.local.get(MIGRATION_V2_KEY);
+  if (res[MIGRATION_V2_KEY]) return;
+  const profiles = await rawList();
+  let changed = false;
+  const next = profiles.map((p) => {
+    if (p.kind !== 'remote-mcp') return p;
+    const config = { ...p.config };
+    let touched = false;
+    if (typeof config.endpoint !== 'string' || !config.endpoint) {
+      config.endpoint = TENCENT_DOCS_MCP_ENDPOINT;
+      touched = true;
+    }
+    if (!config.authScheme) {
+      config.authScheme = 'raw';
+      touched = true;
+    }
+    if (touched) changed = true;
+    return touched ? { ...p, config } : p;
+  });
+  if (changed) await rawSave(next);
+  await browser.storage.local.set({ [MIGRATION_V2_KEY]: true });
+}
+
 export async function listConnectorProfiles(): Promise<ConnectorProfile[]> {
   await ensureMigration();
+  await ensureMigrationV2();
   return rawList();
 }
 
@@ -66,6 +100,7 @@ export async function saveConnectorProfile(
   input: Omit<ConnectorProfile, 'id' | 'createdAt'> & { id?: string },
 ): Promise<ConnectorProfile> {
   await ensureMigration();
+  await ensureMigrationV2();
   const profiles = await rawList();
   let profile: ConnectorProfile;
   if (input.id) {
@@ -123,6 +158,18 @@ export async function getActiveConnectorProfile(): Promise<ConnectorProfile | nu
   return profiles.find((p) => p.id === activeId) ?? profiles[0] ?? null;
 }
 
+/** 401 兜底重试成功后的默认写回（重读最新 config 再合并，避免覆盖并发写入的 lastTest 等） */
+async function persistAuthScheme(
+  profile: ConnectorProfile,
+  scheme: 'raw' | 'bearer',
+): Promise<void> {
+  const latest = (await rawList()).find((p) => p.id === profile.id);
+  if (!latest) return;
+  await updateConnectorProfile(profile.id, {
+    config: { ...latest.config, authScheme: scheme },
+  });
+}
+
 /** 按 profile 构造连接器实例（deps 仅供测试注入） */
 export function buildConnector(
   profile: ConnectorProfile,
@@ -133,7 +180,9 @@ export function buildConnector(
       return createNotionConnector(profile, deps);
     case 'remote-mcp':
     case 'custom-mcp':
-      return createMcpConnector(profile, deps);
+    case 'local-mcp':
+      // 默认注入 401 兜底的 scheme 写回；测试可用 deps.persistAuthScheme 覆盖
+      return createMcpConnector(profile, { persistAuthScheme, ...deps });
     case 'local-bridge':
       return createBridgeConnector(profile, deps);
   }

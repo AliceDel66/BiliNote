@@ -25,7 +25,7 @@ export class McpError extends Error {
   get userMessage(): string {
     switch (this.kind) {
       case 'auth':
-        return 'MCP 端点拒绝访问（401/403），请检查 Bearer Token';
+        return 'MCP 端点拒绝访问（401/403），请检查访问令牌（Token）是否正确';
       case 'timeout':
         return 'MCP 端点响应超时（10s），请确认服务可达后重试';
       case 'protocol':
@@ -52,6 +52,12 @@ export interface McpServerInfo {
 export interface McpClientOptions {
   endpoint: string;
   token?: string;
+  /**
+   * 自定义鉴权头（如腾讯文档官方要求的「Authorization 直接放原始 token 值、
+   * 不加 Bearer 前缀」）。提供时优先于 token；token 仍保留是为了向后兼容
+   * （既存 custom-mcp profile：token → Bearer）。
+   */
+  authHeader?: { name: string; value: string };
   /** 测试注入用 */
   fetchImpl?: typeof fetch;
   /** 单请求超时，默认 10000ms */
@@ -108,7 +114,11 @@ export function createMcpClient(opts: McpClientOptions): McpClient {
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json, text/event-stream',
-          ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
+          ...(opts.authHeader
+            ? { [opts.authHeader.name]: opts.authHeader.value }
+            : opts.token
+              ? { Authorization: `Bearer ${opts.token}` }
+              : {}),
         },
         body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
         signal: controller.signal,

@@ -2,8 +2,11 @@
  * 设置页「知识库连接」目录卡（讨论稿 §2：Notion 只是内置预设之一）。
  *
  * - 已配置列表：kind 图标 + 名称 + 状态徽章 + 连接状态 + 默认写入单选 + 测试/配置/移除；
- * - 添加连接：4 个模板 tile（Notion 官方预设 / 腾讯文档 Beta / Custom Remote MCP /
- *   Local Markdown Bridge），点击展开对应行内表单；
+ * - 添加连接：6 个模板 tile（Notion 官方预设 / 腾讯文档 Beta / 飞书文档 Beta /
+ *   Custom Remote MCP / Local Markdown Bridge / 语雀本地 MCP），点击展开对应行内表单；
+ * - 腾讯文档：官方端点预填、Token 以原始值放 Authorization 头（authScheme raw）；
+ *   飞书文档：个人 MCP URL 即凭据（authScheme none）；语雀：local-mcp，经本机
+ *   bridge mcp-proxy 把 Python stdio 服务（yuque-mcp）代理成 HTTP；
  * - Notion 表单即原「Notion 集成」令牌 + 根页面流程（配置仍存 NotionConfig，行为不变）。
  */
 import { useCallback, useEffect, useState } from 'react';
@@ -18,14 +21,18 @@ import {
 import {
   assertPublicHttpsUrl,
   CONNECTOR_KIND_INFO,
+  CONNECTOR_PRESETS,
   DEFAULT_BRIDGE_PORT,
+  DEFAULT_LOCAL_MCP_PORT,
   listConnectorProfiles,
   originPatternOf,
   removeConnectorProfile,
   saveConnectorProfile,
   setActiveConnectorProfileId,
+  TENCENT_DOCS_MCP_ENDPOINT,
   updateConnectorProfile,
   type ConnectorKind,
+  type ConnectorPreset,
   type ConnectorProfile,
   type ConnectorStatus,
   type ConnectorTestResult,
@@ -68,8 +75,26 @@ function genToken(): string {
 
 function kindIcon(kind: ConnectorKind) {
   if (kind === 'notion') return <NotebookPenIcon size={14} />;
-  if (kind === 'local-bridge') return <SaveIcon size={14} />;
+  if (kind === 'local-bridge' || kind === 'local-mcp') return <SaveIcon size={14} />;
   return <CloudUploadIcon size={14} />;
+}
+
+/** 既有 profile → 配置表单预设（remote-mcp 按 authScheme 区分腾讯文档 / 飞书文档） */
+function presetOfProfile(p: ConnectorProfile): ConnectorPreset {
+  const byId = (id: ConnectorPreset['id']): ConnectorPreset =>
+    CONNECTOR_PRESETS.find((x) => x.id === id) ?? CONNECTOR_PRESETS[0];
+  switch (p.kind) {
+    case 'notion':
+      return byId('notion');
+    case 'remote-mcp':
+      return byId(p.config.authScheme === 'none' ? 'feishu-docs' : 'tencent-docs');
+    case 'custom-mcp':
+      return byId('custom-mcp');
+    case 'local-bridge':
+      return byId('local-bridge');
+    case 'local-mcp':
+      return byId('yuque');
+  }
 }
 
 function StatusBadge({ status }: { status: ConnectorStatus }) {
@@ -307,33 +332,40 @@ function NotionConfigForm({ onChanged }: { onChanged: () => Promise<void> }) {
   );
 }
 
-// ---------- 通用连接配置表单（腾讯文档 / 自定义 MCP / 本地 Bridge） ----------
+// ---------- 通用连接配置表单（按预设区分：腾讯文档 / 飞书文档 / 自定义 MCP / 本地 Bridge / 语雀） ----------
 
 function ConnectorForm({
-  kind,
+  preset,
   profile,
   onDone,
   onCancel,
 }: {
-  kind: ConnectorKind;
+  preset: ConnectorPreset;
   profile?: ConnectorProfile;
   onDone: () => Promise<void>;
   onCancel: () => void;
 }) {
-  const info = CONNECTOR_KIND_INFO[kind];
-  const [name, setName] = useState(profile?.name ?? info.defaultName);
-  const [endpoint, setEndpoint] = useState(String(profile?.config.endpoint ?? ''));
+  const defaultPort = preset.id === 'yuque' ? DEFAULT_LOCAL_MCP_PORT : DEFAULT_BRIDGE_PORT;
+  const [name, setName] = useState(profile?.name ?? preset.defaultName);
+  const [endpoint, setEndpoint] = useState(
+    String(
+      profile?.config.endpoint ??
+        (preset.id === 'tencent-docs' ? TENCENT_DOCS_MCP_ENDPOINT : ''),
+    ),
+  );
   const [token, setToken] = useState(String(profile?.config.token ?? ''));
-  const [port, setPort] = useState(String(profile?.config.port ?? DEFAULT_BRIDGE_PORT));
+  const [port, setPort] = useState(String(profile?.config.port ?? defaultPort));
   const [msg, setMsg] = useState<Msg>(null);
   const [busy, setBusy] = useState(false);
 
-  const isMcp = kind === 'remote-mcp' || kind === 'custom-mcp';
-  const isBridge = kind === 'local-bridge';
+  const isRemote = preset.kind === 'remote-mcp' || preset.kind === 'custom-mcp';
+  const isLocal = preset.kind === 'local-bridge' || preset.kind === 'local-mcp';
+  // 飞书个人 MCP 的凭据内嵌在 URL 路径里，没有独立 Token 字段
+  const showToken = preset.id !== 'feishu-docs';
 
-  // 自定义 MCP：实时 SSRF 校验提示
+  // 远程端点：实时 SSRF 校验提示
   const endpointError = (() => {
-    if (!isMcp || !endpoint.trim()) return null;
+    if (!isRemote || !endpoint.trim()) return null;
     try {
       assertPublicHttpsUrl(endpoint);
       return null;
@@ -342,21 +374,58 @@ function ConnectorForm({
     }
   })();
 
+  const validate = (): string | null => {
+    if (isRemote) {
+      try {
+        assertPublicHttpsUrl(endpoint);
+      } catch (e) {
+        return (e as Error).message;
+      }
+      if (preset.id === 'tencent-docs' && !token.trim()) {
+        return '请填写腾讯文档 MCP Token（获取方式见下方说明）';
+      }
+    }
+    if (isLocal) {
+      const n = Number(port);
+      if (!Number.isInteger(n) || n < 1 || n > 65535) return '端口必须是 1–65535 的整数';
+      if (!token.trim()) return '请填写 bridge token（或点击「生成随机 token」）';
+    }
+    return null;
+  };
+
+  const buildConfig = (): Record<string, unknown> => {
+    switch (preset.id) {
+      case 'tencent-docs':
+        // 官方要求 Authorization 头直接放原始 token 值（无 Bearer 前缀）
+        return { endpoint: endpoint.trim(), authScheme: 'raw', token: token.trim() };
+      case 'feishu-docs':
+        return { endpoint: endpoint.trim(), authScheme: 'none' };
+      case 'custom-mcp':
+        return { endpoint: endpoint.trim(), ...(token.trim() ? { token: token.trim() } : {}) };
+      case 'yuque':
+        return { port: Number(port) || defaultPort, token: token.trim() };
+      default:
+        return { port: Number(port) || defaultPort, token: token.trim() };
+    }
+  };
+
   const buildProfile = (): Omit<ConnectorProfile, 'id' | 'createdAt'> & { id?: string } => ({
     ...(profile ? { id: profile.id } : {}),
-    kind,
-    name: name.trim() || info.defaultName,
-    status: info.status,
-    config: isMcp
-      ? { endpoint: endpoint.trim(), ...(token.trim() ? { token: token.trim() } : {}) }
-      : { port: Number(port) || DEFAULT_BRIDGE_PORT, token: token.trim() },
+    kind: preset.kind,
+    name: name.trim() || preset.defaultName,
+    status: preset.status,
+    config: buildConfig(),
   });
 
   const onTest = async () => {
     setBusy(true);
     setMsg(null);
     try {
-      if (isMcp) assertPublicHttpsUrl(endpoint);
+      const invalid = validate();
+      if (invalid) {
+        setMsg({ kind: 'err', text: invalid });
+        return;
+      }
       const draft = { ...buildProfile(), id: 'draft', createdAt: 0 };
       const result = (await callBg({ type: 'connectorTest', profile: draft })) as ConnectorTestResult;
       setMsg({ kind: result.ok ? 'ok' : 'err', text: result.detail });
@@ -371,16 +440,16 @@ function ConnectorForm({
     setBusy(true);
     setMsg(null);
     try {
-      if (isMcp) {
+      const invalid = validate();
+      if (invalid) {
+        setMsg({ kind: 'err', text: invalid });
+        return;
+      }
+      if (isRemote) {
         const url = assertPublicHttpsUrl(endpoint);
         await requestOriginQuiet([originPatternOf(url)]);
       }
-      if (isBridge) {
-        if (!token.trim()) {
-          setMsg({ kind: 'err', text: '请填写 bridge token（或点击「生成随机 token」）' });
-          setBusy(false);
-          return;
-        }
+      if (isLocal) {
         await requestOriginQuiet(['http://127.0.0.1/*', 'http://localhost/*']);
       }
       await saveConnectorProfile(buildProfile());
@@ -392,6 +461,19 @@ function ConnectorForm({
     }
   };
 
+  const tokenLabel =
+    preset.id === 'tencent-docs'
+      ? 'MCP Token'
+      : preset.id === 'custom-mcp'
+        ? 'Bearer Token（可选）'
+        : 'Bridge Token';
+  const tokenPlaceholder =
+    preset.id === 'tencent-docs'
+      ? '腾讯文档「使用MCP → 获取MCP token」'
+      : preset.id === 'custom-mcp'
+        ? '留空表示无鉴权'
+        : 'bridge 启动时打印的 token';
+
   return (
     <div className="space-y-3 rounded-[10px] border border-line dark:border-line-dark p-3">
       <label className="block text-xs font-medium text-ink-2 dark:text-ink-2-dark">
@@ -399,37 +481,67 @@ function ConnectorForm({
         <Input className="mt-1" value={name} onChange={(e) => setName(e.target.value)} />
       </label>
 
-      {isMcp && (
+      {isRemote && (
         <>
           <label className="block text-xs font-medium text-ink-2 dark:text-ink-2-dark">
-            MCP 端点 URL
+            {preset.id === 'feishu-docs' ? '个人 MCP URL' : 'MCP 端点 URL'}
             <Input
               className="mt-1 font-mono"
-              placeholder="https://example.com/mcp"
+              placeholder={
+                preset.id === 'feishu-docs'
+                  ? 'https://open.feishu.cn/mcp/stream/mcp_…'
+                  : 'https://example.com/mcp'
+              }
               value={endpoint}
               onChange={(e) => setEndpoint(e.target.value)}
             />
           </label>
-          <label className="block text-xs font-medium text-ink-2 dark:text-ink-2-dark">
-            Bearer Token（可选）
-            <Input
-              className="mt-1 font-mono"
-              type="password"
-              placeholder="留空表示无鉴权"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-            />
-          </label>
+          {showToken && (
+            <label className="block text-xs font-medium text-ink-2 dark:text-ink-2-dark">
+              {tokenLabel}
+              <Input
+                className="mt-1 font-mono"
+                type="password"
+                placeholder={tokenPlaceholder}
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+              />
+            </label>
+          )}
           {endpointError && <p className="text-xs text-red-600 dark:text-red-400">{endpointError}</p>}
-          <p className="text-xs text-ink-2 dark:text-ink-2-dark">
-            {kind === 'remote-mcp'
-              ? '腾讯文档 MCP 接入目前为 Beta 质量：能力以端点 tools/list 实际返回为准。'
-              : '仅允许公网 HTTPS 端点；localhost / 内网地址会被安全策略拦截。保存时将申请该域名的访问权限。'}
-          </p>
+          {preset.id === 'tencent-docs' && (
+            <p className="text-xs text-ink-2 dark:text-ink-2-dark">
+              官方 MCP 端点已预填（可改）。Token 获取：腾讯文档「空间列表 → ≡ → 使用MCP →
+              获取MCP token」（需超级会员，有效期一年）；频率：免费 2000 次/天 · 超级会员
+              20000 · Plus 40000。详见{' '}
+              <a
+                href="https://docs.qq.com/open/document/mcp/get-token/"
+                target="_blank"
+                rel="noreferrer"
+                className="text-brand-600 dark:text-brand-300 underline"
+              >
+                官方接入文档
+              </a>
+              。Token 按官方要求以原始值放入 Authorization 头（不加 Bearer 前缀），能力以端点
+              tools/list 实际返回为准（Beta）。
+            </p>
+          )}
+          {preset.id === 'feishu-docs' && (
+            <p className="text-xs text-ink-2 dark:text-ink-2-dark">
+              在飞书 MCP 配置页按需生成个人 MCP URL（文档能力选 docx 范围）后粘贴到此处；
+              URL 路径本身即凭据（mcp_ 前缀），无需额外 Token。保存时将申请 open.feishu.cn
+              的访问权限，能力以端点 tools/list 实际返回为准（Beta）。
+            </p>
+          )}
+          {preset.id === 'custom-mcp' && (
+            <p className="text-xs text-ink-2 dark:text-ink-2-dark">
+              仅允许公网 HTTPS 端点；localhost / 内网地址会被安全策略拦截。保存时将申请该域名的访问权限。
+            </p>
+          )}
         </>
       )}
 
-      {isBridge && (
+      {isLocal && (
         <>
           <div className="flex gap-2">
             <label className="block w-28 text-xs font-medium text-ink-2 dark:text-ink-2-dark">
@@ -441,21 +553,47 @@ function ConnectorForm({
               />
             </label>
             <label className="block flex-1 text-xs font-medium text-ink-2 dark:text-ink-2-dark">
-              Token
+              {tokenLabel}
               <Input
                 className="mt-1 font-mono"
-                placeholder="bridge 启动时打印的 token"
+                placeholder={tokenPlaceholder}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
               />
             </label>
           </div>
-          <p className="text-xs text-ink-2 dark:text-ink-2-dark">
-            先在终端启动本机 bridge：
-            <span className="font-mono"> node scripts/bridge.mjs --root &lt;你的笔记目录&gt; </span>
-            （默认端口 {DEFAULT_BRIDGE_PORT}，--token 省略时自动生成并打印），再把端口与 token
-            填到此处。一个 bridge 同时适用于 Obsidian / Logseq / 纯 Markdown 文件夹。
-          </p>
+          {preset.id === 'yuque' ? (
+            <div className="space-y-1 text-xs text-ink-2 dark:text-ink-2-dark">
+              <p>语雀 MCP 是 Python stdio 服务，需经本机 bridge 代理后供扩展连接：</p>
+              <p>
+                ① 安装 yuque-mcp：
+                <span className="font-mono"> pip install -e . </span>（或
+                <span className="font-mono"> uv pip install -e . </span>，仓库
+                EnglandLobster/yuque-mcp）；
+              </p>
+              <p>
+                ② 从 <span className="font-mono">yuque.com/settings/tokens</span> 获取语雀 API
+                Token；
+              </p>
+              <p>
+                ③ 启动代理（--env 填语雀 Token，--token 填上方 bridge token）：
+                <br />
+                <span className="font-mono break-all">
+                  node scripts/bridge.mjs mcp-proxy --command &quot;python -m yuque_mcp.server&quot;
+                  --env YUQUE_API_TOKEN=&lt;语雀Token&gt; --port {port || DEFAULT_LOCAL_MCP_PORT}{' '}
+                  --token &lt;bridge token&gt;
+                </span>
+              </p>
+              <p>④ 回到此处点「连接测试」。</p>
+            </div>
+          ) : (
+            <p className="text-xs text-ink-2 dark:text-ink-2-dark">
+              先在终端启动本机 bridge：
+              <span className="font-mono"> node scripts/bridge.mjs --root &lt;你的笔记目录&gt; </span>
+              （默认端口 {DEFAULT_BRIDGE_PORT}，--token 省略时自动生成并打印），再把端口与 token
+              填到此处。一个 bridge 同时适用于 Obsidian / Logseq / 纯 Markdown 文件夹。
+            </p>
+          )}
           <Button variant="ghost" size="sm" onClick={() => setToken(genToken())}>
             生成随机 token
           </Button>
@@ -478,7 +616,7 @@ function ConnectorForm({
         <Button
           variant="ghost"
           size="sm"
-          disabled={busy || (isMcp && (!endpoint.trim() || !!endpointError))}
+          disabled={busy || (isRemote && (!endpoint.trim() || !!endpointError))}
           onClick={() => void onTest()}
         >
           连接测试
@@ -486,7 +624,7 @@ function ConnectorForm({
         <Button
           variant="primary"
           size="sm"
-          disabled={busy || (isMcp && (!endpoint.trim() || !!endpointError))}
+          disabled={busy || (isRemote && (!endpoint.trim() || !!endpointError))}
           onClick={() => void onSave()}
         >
           保存连接
@@ -507,7 +645,7 @@ export default function ConnectorsSection() {
   const [lastSync, setLastSync] = useState<Record<string, LastSyncInfo | null>>({});
   const [tests, setTests] = useState<Record<string, ConnectorTestResult | undefined>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [adding, setAdding] = useState<ConnectorKind | null>(null);
+  const [adding, setAdding] = useState<ConnectorPreset['id'] | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [autoSync, setAutoSync] = useState(true);
 
@@ -570,16 +708,15 @@ export default function ConnectorsSection() {
   };
 
   const hasNotion = profiles.some((p) => p.kind === 'notion');
-  const tiles = (Object.keys(CONNECTOR_KIND_INFO) as ConnectorKind[]).filter(
-    (k) => k !== 'notion' || !hasNotion,
-  );
+  const tiles = CONNECTOR_PRESETS.filter((p) => p.id !== 'notion' || !hasNotion);
+  const addingPreset = CONNECTOR_PRESETS.find((p) => p.id === adding);
 
   return (
     <section className="space-y-3">
       <Card>
         <SectionTitle icon={<DatabaseIcon />} title="知识库连接" />
         <p className="mb-3 text-xs text-ink-2 dark:text-ink-2-dark">
-          Notion 只是内置预设之一；首发支持 4 类连接，默认写入目标单选。
+          Notion 只是内置预设之一；内置 6 个连接预设（在线文档 / 自定义 MCP / 本机库），默认写入目标单选。
         </p>
 
         {profiles.length === 0 && (
@@ -663,7 +800,7 @@ export default function ConnectorsSection() {
                       </div>
                     ) : (
                       <ConnectorForm
-                        kind={p.kind}
+                        preset={presetOfProfile(p)}
                         profile={p}
                         onDone={onFormDone}
                         onCancel={() => setEditingId(null)}
@@ -690,41 +827,42 @@ export default function ConnectorsSection() {
 
         <p className="mt-4 mb-2 text-xs font-medium text-ink-2 dark:text-ink-2-dark">添加连接</p>
         <div className="grid grid-cols-2 gap-2">
-          {tiles.map((k) => {
-            const info = CONNECTOR_KIND_INFO[k];
-            return (
-              <button
-                key={k}
-                type="button"
-                onClick={() => {
-                  setEditingId(null);
-                  setAdding(adding === k ? null : k);
-                }}
-                className={`rounded-[10px] border p-3 text-left transition-colors cursor-pointer ${
-                  adding === k
-                    ? 'border-brand-500 bg-brand-soft dark:bg-brand-soft-dark'
-                    : 'border-line dark:border-line-dark hover:border-brand-500'
-                }`}
-              >
-                <p className="flex items-center gap-2 font-medium">
-                  <span className="text-brand-500 dark:text-brand-300">{kindIcon(k)}</span>
-                  {info.label}
-                  <StatusBadge status={info.status} />
-                </p>
-                <p className="mt-1 text-xs text-ink-2 dark:text-ink-2-dark">{info.desc}</p>
-              </button>
-            );
-          })}
+          {tiles.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              onClick={() => {
+                setEditingId(null);
+                setAdding(adding === preset.id ? null : preset.id);
+              }}
+              className={`rounded-[10px] border p-3 text-left transition-colors cursor-pointer ${
+                adding === preset.id
+                  ? 'border-brand-500 bg-brand-soft dark:bg-brand-soft-dark'
+                  : 'border-line dark:border-line-dark hover:border-brand-500'
+              }`}
+            >
+              <p className="flex items-center gap-2 font-medium">
+                <span className="text-brand-500 dark:text-brand-300">{kindIcon(preset.kind)}</span>
+                {preset.label}
+                <StatusBadge status={preset.status} />
+              </p>
+              <p className="mt-1 text-xs text-ink-2 dark:text-ink-2-dark">{preset.desc}</p>
+            </button>
+          ))}
         </div>
 
-        {adding && (
+        {addingPreset && (
           <div className="mt-3">
-            {adding === 'notion' ? (
+            {addingPreset.kind === 'notion' ? (
               <div className="rounded-[10px] border border-line dark:border-line-dark p-3">
                 <NotionConfigForm onChanged={onFormDone} />
               </div>
             ) : (
-              <ConnectorForm kind={adding} onDone={onFormDone} onCancel={() => setAdding(null)} />
+              <ConnectorForm
+                preset={addingPreset}
+                onDone={onFormDone}
+                onCancel={() => setAdding(null)}
+              />
             )}
           </div>
         )}

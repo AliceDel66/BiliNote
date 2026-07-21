@@ -74,6 +74,33 @@ describe('mcpClient JSON-RPC 帧', () => {
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers.Authorization).toBeUndefined();
   });
+
+  it('authHeader 原样写入指定头（raw 值不加 Bearer 前缀），且优先于 token', async () => {
+    const { calls, fetchImpl } = mockFetch(() => ({}));
+    const client = createMcpClient({
+      endpoint: 'https://docs.qq.com/openapi/mcp',
+      token: 'ignored-legacy-token',
+      authHeader: { name: 'Authorization', value: 'raw-tencent-token' },
+      fetchImpl,
+    });
+    await client.initialize();
+    const headers = calls[0].init.headers as Record<string, string>;
+    // 腾讯文档官方要求：Authorization 头直接放原始 token 值
+    expect(headers.Authorization).toBe('raw-tencent-token');
+  });
+
+  it('authHeader 支持自定义头名', async () => {
+    const { calls, fetchImpl } = mockFetch(() => ({}));
+    const client = createMcpClient({
+      endpoint: 'https://mcp.example.com',
+      authHeader: { name: 'X-Api-Key', value: 'k-1' },
+      fetchImpl,
+    });
+    await client.initialize();
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(headers['X-Api-Key']).toBe('k-1');
+    expect(headers.Authorization).toBeUndefined();
+  });
 });
 
 describe('mcpClient 响应解析', () => {
