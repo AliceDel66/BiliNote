@@ -67,11 +67,24 @@ export type AnalyzePortMsg =
   | { type: 'analyze'; bvid: string; p: number; force?: boolean }
   | { type: 'cancel' };
 
-/** Background → Side Panel 分析端口事件 */
+/**
+ * 分析事件绑定的视频身份（C1）：终态事件全部携带，
+ * UI 丢弃与当前页不匹配的事件，防止串视频 / 误存到别的课程。
+ * cid=0 表示视频信息尚未解析出来（仅在极早期错误时出现）。
+ */
+export interface AnalyzeEventScope {
+  bvid: string;
+  cid: number;
+  p: number;
+}
+
+/** Background → Side Panel 分析端口事件（全部携带视频身份，进度事件也不例外） */
 export type AnalyzePortEvent =
-  | ProgressEvent
-  | { type: 'no-subtitle' }
-  | { type: 'done-cached'; result: AnalysisResult };
+  | (Exclude<ProgressEvent, { type: 'done' } | { type: 'error' }> & AnalyzeEventScope)
+  | ({ type: 'done'; result: AnalysisResult } & AnalyzeEventScope)
+  | ({ type: 'error'; message: string } & AnalyzeEventScope)
+  | ({ type: 'no-subtitle' } & AnalyzeEventScope)
+  | ({ type: 'done-cached'; result: AnalysisResult } & AnalyzeEventScope);
 
 export const ANALYZE_PORT = 'bilinote-analyze';
 
@@ -94,9 +107,15 @@ export type ChatPortMsg =
     }
   | { type: 'cancel' };
 
-/** Background → Side Panel Chat 端口事件 */
+/** Background → Side Panel Chat 端口事件（顺序契约 C2：context-ready 最先，answer-done 永远最后） */
 export type ChatPortEvent =
-  | { type: 'context-ready'; snapshot: ChatSnapshot; completeness: Completeness }
+  | {
+      type: 'context-ready';
+      snapshot: ChatSnapshot;
+      completeness: Completeness;
+      /** 本轮实际采用的话题（传入的 stale/跨课程 topicId 会被忽略并新建，UI 以此为准） */
+      topicId: string;
+    }
   | { type: 'tool-start'; kind: 'web_search'; provider: string }
   | { type: 'tool-done'; kind: 'web_search' }
   | { type: 'tool-failed'; kind: 'web_search'; message: string }

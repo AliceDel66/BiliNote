@@ -67,6 +67,8 @@ export async function syncNoteWithStoredConfig(
   return syncNoteToNotion({
     client,
     rootPageId: config.rootPageId,
+    // botId 仅当配置期缓存过（users/me）才有值；缺省时按 rootPageId 单维度 scope
+    botId: config.botId,
     noteId,
     force,
     storage: createNotionSyncStorage(),

@@ -29,6 +29,7 @@ async function seedNote() {
     template: 'blank',
     source: 'ai',
     dirty: true,
+    rev: 1,
     createdAt: 1,
     updatedAt: 1,
   });

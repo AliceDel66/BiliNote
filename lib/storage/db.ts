@@ -47,6 +47,8 @@ export interface NoteRow {
   template: 'study' | 'work' | 'blank';
   source: 'ai' | 'manual' | 'mixed';
   dirty: boolean;
+  /** 乐观锁版本号（C3）：每次成功写入 +1；升级前的旧行运行时缺失，一律按 1 处理 */
+  rev: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -70,9 +72,13 @@ export interface NotionMappingRow {
   coursePageId?: string;
   /** 章节页（分 P 标题）；单 P 视频无章节页，内容直接写在课程页下 */
   chapterPageId?: string;
+  /** 映射所属 scope（C4）：同步根页面。仅在 rootPageId 与当前配置一致时复用页面 id */
+  rootPageId?: string;
+  /** 映射所属 scope（C4）：集成 bot id；双侧都已知时才参与校验 */
+  botId?: string;
   /** 上次同步完成时间（本地 ms） */
   lastSyncedAt: number;
-  /** 上次同步后 Notion 页面的 last_edited_time（ISO 字符串原样保存） */
+  /** 上次同步后 Notion 页面的 last_edited_time（ISO 字符串原样保存，冲突检测基线） */
   notionLastEditedTime: string;
   syncStatus: NotionSyncStatus;
   error?: string;
@@ -129,8 +135,11 @@ export async function getCachedSubtitle(
 export async function saveSubtitle(
   row: Omit<SubtitleRow, 'id'>,
 ): Promise<void> {
-  await db.subtitles.where('[bvid+cid]').equals([row.bvid, row.cid]).delete();
-  await db.subtitles.add(row);
+  // 单事务内 读旧行 → put（自然唯一键 [bvid+cid]）：不做 delete→add，避免中途丢数据
+  await db.transaction('rw', db.subtitles, async () => {
+    const old = await db.subtitles.where('[bvid+cid]').equals([row.bvid, row.cid]).first();
+    await db.subtitles.put({ ...row, id: old?.id });
+  });
 }
 
 export async function getCachedSummary(
@@ -154,11 +163,14 @@ export async function getLatestSummary(
 }
 
 export async function saveSummary(row: Omit<SummaryRow, 'id'>): Promise<void> {
-  await db.summaries
-    .where('[bvid+cid+modelId]')
-    .equals([row.bvid, row.cid, row.modelId])
-    .delete();
-  await db.summaries.add(row);
+  // 单事务内 读旧行 → put（自然唯一键 [bvid+cid+modelId]）：不做 delete→add
+  await db.transaction('rw', db.summaries, async () => {
+    const old = await db.summaries
+      .where('[bvid+cid+modelId]')
+      .equals([row.bvid, row.cid, row.modelId])
+      .first();
+    await db.summaries.put({ ...row, id: old?.id });
+  });
 }
 
 export async function upsertVideo(video: Omit<VideoRow, 'firstSeenAt' | 'lastViewedAt'>): Promise<void> {
@@ -184,6 +196,7 @@ export async function createNote(
     source: 'manual',
     ...input,
     dirty: true,
+    rev: 1,
     createdAt: now,
     updatedAt: now,
   };
@@ -192,28 +205,70 @@ export async function createNote(
   return { ...row, id };
 }
 
+/** 笔记 CAS 版本冲突（saveNoteCAS 抛出）：携带冲突时刻的最新行，调用方据此重放或提示 */
+export class NoteRevConflict extends Error {
+  constructor(readonly latest: NoteRow) {
+    super('笔记已被其他写入修改（版本冲突）');
+    this.name = 'NoteRevConflict';
+  }
+}
+
+/**
+ * 单事务持久化笔记补丁：内容变化时写版本历史（只留最近 10 版），
+ * 成功写入一律 rev+1 并标记 dirty（待同步）。
+ * expectedRev 提供时做 CAS 校验，不匹配抛 NoteRevConflict。
+ */
+async function persistNotePatch(
+  id: number,
+  patch: Partial<Pick<NoteRow, 'title' | 'contentMd'>>,
+  expectedRev?: number,
+): Promise<NoteRow> {
+  return db.transaction('rw', db.notes, db.noteVersions, async () => {
+    const existing = await db.notes.get(id);
+    if (!existing) throw new Error('笔记不存在');
+    const currentRev = existing.rev ?? 1; // 升级前的旧行按 1 处理
+    if (expectedRev !== undefined && currentRev !== expectedRev) {
+      throw new NoteRevConflict(existing);
+    }
+    const now = Date.now();
+    const contentChanged =
+      patch.contentMd !== undefined && patch.contentMd !== existing.contentMd;
+    const changes = { ...patch, dirty: true, updatedAt: now, rev: currentRev + 1 };
+    await db.notes.update(id, changes);
+    if (contentChanged) {
+      await db.noteVersions.add({ noteId: id, contentMd: patch.contentMd!, createdAt: now });
+      const versions = await db.noteVersions.where('noteId').equals(id).sortBy('createdAt');
+      const excess = versions.length - NOTE_VERSIONS_KEEP;
+      if (excess > 0) {
+        await db.noteVersions.bulkDelete(versions.slice(0, excess).map((v) => v.id!));
+      }
+    }
+    return { ...existing, ...changes, id };
+  });
+}
+
 /**
  * 保存笔记内容（自动保存防抖在 UI 侧处理）。内容变化时写入版本历史，
  * 每份笔记只保留最近 10 版；保存会把笔记标记为 dirty（待同步）。
+ * 非 CAS 旧路径：不做版本校验（rev 照常 +1），新写入方请用 saveNoteCAS。
  */
 export async function saveNote(
   id: number,
   patch: Partial<Pick<NoteRow, 'title' | 'contentMd'>>,
 ): Promise<void> {
-  const existing = await db.notes.get(id);
-  if (!existing) throw new Error('笔记不存在');
-  const now = Date.now();
-  const contentChanged =
-    patch.contentMd !== undefined && patch.contentMd !== existing.contentMd;
-  await db.notes.update(id, { ...patch, dirty: true, updatedAt: now });
-  if (contentChanged) {
-    await db.noteVersions.add({ noteId: id, contentMd: patch.contentMd!, createdAt: now });
-    const versions = await db.noteVersions.where('noteId').equals(id).sortBy('createdAt');
-    const excess = versions.length - NOTE_VERSIONS_KEEP;
-    if (excess > 0) {
-      await db.noteVersions.bulkDelete(versions.slice(0, excess).map((v) => v.id!));
-    }
-  }
+  await persistNotePatch(id, patch);
+}
+
+/**
+ * CAS 保存（C3）：仅当当前 rev === expectedRev 时写入，否则抛 NoteRevConflict
+ * （携带最新行）。成功返回写入后的最新行（rev 已 +1）。
+ */
+export async function saveNoteCAS(
+  id: number,
+  patch: Partial<Pick<NoteRow, 'title' | 'contentMd'>>,
+  expectedRev: number,
+): Promise<NoteRow> {
+  return persistNotePatch(id, patch, expectedRev);
 }
 
 export async function getNote(id: number): Promise<NoteRow | undefined> {
@@ -308,13 +363,24 @@ export async function getLatestConnectorSync(
   return rows.sort((a, b) => b.lastSyncedAt - a.lastSyncedAt)[0];
 }
 
-/** 同视频其他笔记已建过的课程页 id（避免每个分 P 各建一棵课程页） */
-export async function findCoursePageId(bvid: string): Promise<string | undefined> {
+/** 同视频其他笔记已建过的课程页 id（避免每个分 P 各建一棵课程页）。
+ *  传 scope 时只认同一同步根页面（及同一 bot，双侧已知时）下的映射（C4）。 */
+export async function findCoursePageId(
+  bvid: string,
+  scope?: { rootPageId: string; botId?: string },
+): Promise<string | undefined> {
   const notes = await db.notes.where('bvid').equals(bvid).primaryKeys();
   if (notes.length === 0) return undefined;
-  const mapping = await db.notionMappings
+  const mappings = await db.notionMappings
     .where('noteId')
     .anyOf(notes as number[])
-    .first();
-  return mapping?.coursePageId;
+    .toArray();
+  const hit = mappings.find((m) => {
+    if (!m.coursePageId) return false;
+    if (!scope) return true;
+    if (m.rootPageId !== scope.rootPageId) return false;
+    if (scope.botId && m.botId && m.botId !== scope.botId) return false;
+    return true;
+  });
+  return hit?.coursePageId;
 }

@@ -5,8 +5,16 @@
 import { LLMError, httpError } from './errors';
 
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  /** assistant 消息回传的工具调用（Kimi 内置联网等内置工具协议循环用），原样透传 */
+  tool_calls?: {
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }[];
+  /** role=tool 消息对应的 tool_call_id */
+  tool_call_id?: string;
 }
 
 export interface LLMEndpoint {
@@ -100,20 +108,72 @@ export async function testConnection(
   return Date.now() - started;
 }
 
+interface StreamToolCallDelta {
+  index?: number;
+  id?: string;
+  function?: { name?: string; arguments?: string };
+}
+
 interface StreamChunk {
   choices?: {
-    delta?: { content?: string; tool_calls?: unknown };
+    delta?: { content?: string; tool_calls?: StreamToolCallDelta[] };
     finish_reason?: string | null;
   }[];
+}
+
+/** 一次流式请求收到的工具调用（跨 chunk 分片已按 index 合并） */
+export interface CollectedToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+/**
+ * chatStream 的结构化结局（generator return value；`for await` 拿不到，
+ * 需要时用 `const g = chatStream(p); … await g.next()` 手动迭代读取）。
+ */
+export interface ChatStreamOutcome {
+  /** 终端 finish_reason 原样值（未收到为 undefined） */
+  finishReason?: string;
+  /** 模型请求客户端执行的工具调用；空数组 = 正常文本回答 */
+  toolCalls: CollectedToolCall[];
+  /** finish_reason === 'length'：达到 max_tokens，回答不完整（调用方记录/提示用） */
+  truncatedByLength: boolean;
+  /** finish_reason === 'content_filter' 但仍有正文（无正文时直接抛 filtered 错误） */
+  filtered: boolean;
+}
+
+/** 视为「Provider 正常收尾」的 finish_reason：缺少 [DONE] 时不误判截断 */
+const TERMINAL_FINISH_REASONS = new Set(['stop', 'tool_calls', 'length', 'content_filter']);
+
+/** 把一条 tool_calls 分片按 index 合并进收集表（OpenAI 流式协议：首片带 id/name，后续片只补 arguments） */
+function collectToolCallDelta(into: CollectedToolCall[], deltas: StreamToolCallDelta[]): void {
+  for (const d of deltas) {
+    const idx = d.index ?? into.length;
+    const slot = into[idx] ?? { id: '', name: '', arguments: '' };
+    if (d.id) slot.id = d.id;
+    if (d.function?.name) slot.name = d.function.name;
+    if (d.function?.arguments) slot.arguments += d.function.arguments;
+    into[idx] = slot;
+  }
 }
 
 /**
  * 流式 chat completion：async generator，逐段产出 content delta。
  * 解析 SSE（`data: {...}\n\n`，兼容 `[DONE]`）。
+ *
+ * 结束语义（P2 加固）：
+ * - 流结束既没有 `data: [DONE]` 也没有终端 finish_reason → 抛 LLMError('truncated')
+ *   （连接中断 / 响应被截断，调用方不得当作成功）；
+ * - finish_reason === 'content_filter' 且全程无正文 → 抛 LLMError('filtered')；
+ *   有正文则正常完成，经 outcome.filtered 标注；
+ * - finish_reason === 'length' → 正常完成，经 outcome.truncatedByLength 标注；
+ * - 流中出现 tool_calls 不再抛错：按 index 合并收集，经 outcome.toolCalls 交给
+ *   调用方决策（Kimi 内置联网协议循环 / 非内置工具按不支持降级）。
  */
 export async function* chatStream(
   params: ChatStreamParams,
-): AsyncGenerator<string, void, unknown> {
+): AsyncGenerator<string, ChatStreamOutcome, unknown> {
   const f = params.fetchImpl ?? globalThis.fetch;
   let resp: Response;
   try {
@@ -148,6 +208,29 @@ export async function* chatStream(
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let sawDone = false;
+  let finishReason: string | undefined;
+  let receivedContent = false;
+  const toolCalls: CollectedToolCall[] = [];
+
+  /** 解析单个 data: 负载（副作用：收集 tool_calls / finish_reason）；返回是否 [DONE] 与 content delta */
+  const parsePayload = (payload: string): { done: boolean; delta?: string } => {
+    if (payload === '[DONE]') return { done: true };
+    let chunk: StreamChunk;
+    try {
+      chunk = JSON.parse(payload) as StreamChunk;
+    } catch {
+      return { done: false }; // 忽略非 JSON keep-alive 行
+    }
+    const choice0 = chunk.choices?.[0];
+    const delta0 = choice0?.delta;
+    // Provider 请求客户端执行工具：收集合并，由调用方按工具名决策（见函数头注释）
+    if (delta0?.tool_calls) collectToolCallDelta(toolCalls, delta0.tool_calls);
+    const fr = choice0?.finish_reason;
+    if (fr) finishReason = fr;
+    return { done: false, delta: delta0?.content || undefined };
+  };
+
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -159,51 +242,52 @@ export async function* chatStream(
         const line = buffer.slice(0, newlineIdx).trim();
         buffer = buffer.slice(newlineIdx + 1);
         if (!line.startsWith('data:')) continue;
-        const payload = line.slice(5).trim();
-        if (payload === '[DONE]') return;
-        let chunk: StreamChunk;
-        try {
-          chunk = JSON.parse(payload) as StreamChunk;
-        } catch {
-          continue; // 忽略非 JSON keep-alive 行
+        const parsed = parsePayload(line.slice(5).trim());
+        if (parsed.done) {
+          sawDone = true;
+          break;
         }
-        const delta0 = chunk.choices?.[0]?.delta;
-        // Provider 请求客户端执行工具（tool_calls）：扩展无法执行，抛错交给上层按「不支持」降级
-        if (delta0?.tool_calls) {
-          throw new LLMError(
-            'tool_calls',
-            '模型返回了客户端工具调用（tool_calls），当前无法执行',
-          );
+        if (parsed.delta) {
+          receivedContent = true;
+          yield parsed.delta;
         }
-        const delta = delta0?.content;
-        if (delta) yield delta;
       }
+      if (sawDone) break;
     }
     // 处理尾部残留
-    const tail = buffer.trim();
-    if (tail.startsWith('data:')) {
-      const payload = tail.slice(5).trim();
-      if (payload !== '[DONE]') {
-        let chunk: StreamChunk | null = null;
-        try {
-          chunk = JSON.parse(payload) as StreamChunk;
-        } catch {
-          /* ignore */
+    if (!sawDone) {
+      const tail = buffer.trim();
+      if (tail.startsWith('data:')) {
+        const parsed = parsePayload(tail.slice(5).trim());
+        if (parsed.done) {
+          sawDone = true;
+        } else if (parsed.delta) {
+          receivedContent = true;
+          yield parsed.delta;
         }
-        const delta0 = chunk?.choices?.[0]?.delta;
-        if (delta0?.tool_calls) {
-          throw new LLMError(
-            'tool_calls',
-            '模型返回了客户端工具调用（tool_calls），当前无法执行',
-          );
-        }
-        const delta = delta0?.content;
-        if (delta) yield delta;
       }
     }
   } finally {
     reader.releaseLock();
   }
+
+  // 异常结束当成功是数据损坏来源：无 [DONE] 且无终端 finish_reason → 截断错误
+  if (!sawDone && !(finishReason && TERMINAL_FINISH_REASONS.has(finishReason))) {
+    throw new LLMError(
+      'truncated',
+      `流式响应非正常结束（无 [DONE]，finish_reason=${finishReason ?? '无'}）`,
+    );
+  }
+  // 内容过滤且无任何正文：按独立错误类型抛出，避免把空回答当成功
+  if (finishReason === 'content_filter' && !receivedContent) {
+    throw new LLMError('filtered', '模型内容过滤拦截（content_filter），未产出任何内容');
+  }
+  return {
+    finishReason,
+    toolCalls,
+    truncatedByLength: finishReason === 'length',
+    filtered: finishReason === 'content_filter',
+  };
 }
 
 /** 非流式便捷封装：收集完整文本 */

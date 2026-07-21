@@ -7,6 +7,8 @@ export type LLMErrorKind =
   | 'http'
   | 'aborted'
   | 'tool_calls'
+  | 'truncated'
+  | 'filtered'
   | 'bad_response';
 
 export class LLMError extends Error {
@@ -32,6 +34,10 @@ export class LLMError extends Error {
         return '已取消';
       case 'tool_calls':
         return '当前模型请求了客户端工具调用（tool_calls），暂不支持执行';
+      case 'truncated':
+        return '连接中断或响应被截断，请重试';
+      case 'filtered':
+        return '回答被模型的内容过滤拦截（content_filter），请调整提问后重试';
       case 'network':
         return `网络错误：${this.message}，请检查 baseURL 与网络连接`;
       case 'http':

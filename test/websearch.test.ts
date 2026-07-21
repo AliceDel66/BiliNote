@@ -1,14 +1,29 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BUILTIN_WEB_SEARCH_TOOL,
+  WEB_SEARCH_MAX_ROUNDS,
   decideSearchPlan,
   looksLikeToolUnsupported,
+  runBuiltinToolLoop,
   webSearchToolsFor,
   type SearchPlan,
   type ToolMode,
 } from '../lib/chat';
-import { chatStream, LLMError } from '../lib/llm';
+import {
+  chatStream,
+  LLMError,
+  type ChatMessage,
+  type ChatStreamOutcome,
+} from '../lib/llm';
 
 const KIMI_TOOLS = [{ type: 'builtin_function', function: { name: '$web_search' } }];
+
+const OK_OUTCOME: ChatStreamOutcome = {
+  finishReason: 'stop',
+  toolCalls: [],
+  truncatedByLength: false,
+  filtered: false,
+};
 
 describe('webSearchToolsFor（已知 Provider 联网能力表）', () => {
   it('moonshot.cn 域名 → Kimi 内置联网工具 $web_search', () => {
@@ -132,23 +147,122 @@ describe('chatStream tools 透传与 tool_calls 检测', () => {
     expect(captured.body !== null && 'tools' in captured.body).toBe(false);
   });
 
-  it('流中出现 tool_calls → 抛出 tool_calls 类型错误（上层按不支持降级）', async () => {
+  it('流中出现 tool_calls → 不再抛错，收集进结局（供内置工具协议循环使用）', async () => {
     const fetchImpl = sseFetchCapture(
-      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":"{}"}}]}}]}\n\ndata: [DONE]\n\n',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"$web_search","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n',
     );
-    await expect(async () => {
-      for await (const _ of chatStream({
-        baseURL: 'https://api.example.com/v1',
-        apiKey: 'k',
-        model: 'm',
-        messages: [],
-        tools: KIMI_TOOLS,
-        fetchImpl,
-      })) {
-        /* noop */
-      }
-    }).rejects.toSatisfy(
-      (e) => e instanceof LLMError && e.kind === 'tool_calls',
+    const gen = chatStream({
+      baseURL: 'https://api.example.com/v1',
+      apiKey: 'k',
+      model: 'm',
+      messages: [],
+      tools: KIMI_TOOLS,
+      fetchImpl,
+    });
+    let step = await gen.next();
+    while (!step.done) step = await gen.next();
+    expect(step.value.toolCalls).toEqual([{ id: 'call_1', name: '$web_search', arguments: '{}' }]);
+    expect(step.value.finishReason).toBe('tool_calls');
+  });
+});
+
+describe('runBuiltinToolLoop（Kimi 内置联网协议循环）', () => {
+  const baseMessages: ChatMessage[] = [{ role: 'user', content: '问题' }];
+
+  /** 按脚本逐轮返回结局的 roundFn，记录每轮收到的 messages */
+  function scriptedRoundFn(outcomes: ChatStreamOutcome[]) {
+    const seen: ChatMessage[][] = [];
+    const toolsSeen: (unknown[] | undefined)[] = [];
+    const roundFn = async (messages: ChatMessage[], tools: unknown[] | undefined) => {
+      seen.push([...messages]);
+      toolsSeen.push(tools);
+      const outcome = outcomes.shift();
+      if (!outcome) throw new Error('脚本外的额外轮次');
+      return outcome;
+    };
+    return { seen, toolsSeen, roundFn };
+  }
+
+  const toolCallsOutcome = (name: string, id = 'call_1'): ChatStreamOutcome => ({
+    finishReason: 'tool_calls',
+    toolCalls: [{ id, name, arguments: '{"q":"x"}' }],
+    truncatedByLength: false,
+    filtered: false,
+  });
+
+  it('首轮无 tool_calls → 一轮结束，不回传任何消息', async () => {
+    const { seen, roundFn } = scriptedRoundFn([OK_OUTCOME]);
+    const outcome = await runBuiltinToolLoop(baseMessages, KIMI_TOOLS, roundFn);
+    expect(outcome).toBe(OK_OUTCOME);
+    expect(seen).toEqual([baseMessages]);
+  });
+
+  it('内置 $web_search：回传 assistant tool_calls + role=tool ack 后再请求，两轮消息结构正确', async () => {
+    const { seen, toolsSeen, roundFn } = scriptedRoundFn([
+      toolCallsOutcome(BUILTIN_WEB_SEARCH_TOOL),
+      OK_OUTCOME,
+    ]);
+    const outcome = await runBuiltinToolLoop(baseMessages, KIMI_TOOLS, roundFn);
+    expect(outcome).toBe(OK_OUTCOME);
+    expect(seen).toHaveLength(2);
+    // 第二轮 = 原始消息 + assistant tool_calls 回声 + 每个 call 一条 tool ack
+    const round2 = seen[1];
+    expect(round2[0]).toEqual(baseMessages[0]);
+    expect(round2[1]).toEqual({
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        {
+          id: 'call_1',
+          type: 'function',
+          function: { name: BUILTIN_WEB_SEARCH_TOOL, arguments: '{"q":"x"}' },
+        },
+      ],
+    });
+    expect(round2[2]).toEqual({ role: 'tool', tool_call_id: 'call_1', content: '' });
+    expect(round2).toHaveLength(3);
+    // 每轮都带 tools
+    expect(toolsSeen).toEqual([KIMI_TOOLS, KIMI_TOOLS]);
+    // 调用方传入的 messages 不被原地修改
+    expect(baseMessages).toHaveLength(1);
+  });
+
+  it('多个 tool_call：每个 call 各追加一条 tool ack', async () => {
+    const multi: ChatStreamOutcome = {
+      finishReason: 'tool_calls',
+      toolCalls: [
+        { id: 'call_1', name: BUILTIN_WEB_SEARCH_TOOL, arguments: '{}' },
+        { id: 'call_2', name: BUILTIN_WEB_SEARCH_TOOL, arguments: '{}' },
+      ],
+      truncatedByLength: false,
+      filtered: false,
+    };
+    const { seen, roundFn } = scriptedRoundFn([multi, OK_OUTCOME]);
+    await runBuiltinToolLoop(baseMessages, KIMI_TOOLS, roundFn);
+    const round2 = seen[1];
+    expect(round2.filter((m) => m.role === 'tool')).toEqual([
+      { role: 'tool', tool_call_id: 'call_1', content: '' },
+      { role: 'tool', tool_call_id: 'call_2', content: '' },
+    ]);
+  });
+
+  it(`达到 ${WEB_SEARCH_MAX_ROUNDS} 轮仍要调用 → 抛 tool_calls 错误（交给上层降级）`, async () => {
+    const outcomes = Array.from({ length: WEB_SEARCH_MAX_ROUNDS }, () =>
+      toolCallsOutcome(BUILTIN_WEB_SEARCH_TOOL),
     );
+    const { seen, roundFn } = scriptedRoundFn(outcomes);
+    await expect(
+      runBuiltinToolLoop(baseMessages, KIMI_TOOLS, roundFn),
+    ).rejects.toSatisfy((e) => e instanceof LLMError && e.kind === 'tool_calls');
+    // 恰好 MAX 轮，没有多发请求
+    expect(seen).toHaveLength(WEB_SEARCH_MAX_ROUNDS);
+  });
+
+  it('非内置工具名 → 立即抛 tool_calls 错误（不追加任何消息、不多发请求）', async () => {
+    const { seen, roundFn } = scriptedRoundFn([toolCallsOutcome('some_client_tool')]);
+    await expect(
+      runBuiltinToolLoop(baseMessages, KIMI_TOOLS, roundFn),
+    ).rejects.toSatisfy((e) => e instanceof LLMError && e.kind === 'tool_calls');
+    expect(seen).toHaveLength(1);
   });
 });

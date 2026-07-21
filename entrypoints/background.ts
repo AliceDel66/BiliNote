@@ -13,6 +13,7 @@ import {
   type VideoInfo,
 } from '../lib/bilibili';
 import { chatStream, fetchModels, testConnection, LLMError } from '../lib/llm';
+import type { ChatMessage, ChatStreamOutcome } from '../lib/llm';
 import { createNotionClient, NotionError } from '../lib/notion';
 import {
   buildConnector,
@@ -32,8 +33,12 @@ import {
   listNotesByVideo,
   createNote,
   saveNote,
+  saveNoteCAS,
+  NoteRevConflict,
   saveSubtitle,
   saveSummary,
+  saveNotionMapping,
+  saveConnectorSync,
   upsertVideo,
   getActiveProfile,
   getNote,
@@ -62,6 +67,7 @@ import {
   listTurnsByTopic,
   looksLikeToolUnsupported,
   removeQaBlock,
+  runBuiltinToolLoop,
   stripThinking,
   updateSession,
   updateTopic,
@@ -76,6 +82,7 @@ import { summarize } from '../lib/summarize';
 import {
   ANALYZE_PORT,
   CHAT_PORT,
+  type AnalyzePortEvent,
   type AnalyzePortMsg,
   type BgRequest,
   type ChatPortEvent,
@@ -123,6 +130,47 @@ async function maybeAutoSync(noteId: number): Promise<void> {
     if (!config?.token || !config.rootPageId) return;
   }
   await enqueueSync(noteId);
+}
+
+/**
+ * SW 启动恢复（P2：防抖/队列只在内存，SW 被杀后 syncing 行会卡死）：
+ * 1. 上次崩溃前处于 syncing 的行一律归位 pending（notionMappings + connectorSync）；
+ * 2. 当前默认连接维度下，把 pending / error 行重新入队（笔记已删除的静默跳过）。
+ */
+async function rehydrateSyncQueue(): Promise<void> {
+  const profile = await getActiveConnectorProfile();
+  if (!profile) return;
+
+  const staleNotion = await db.notionMappings.where('syncStatus').equals('syncing').toArray();
+  for (const row of staleNotion) {
+    await saveNotionMapping({ ...row, syncStatus: 'pending', error: undefined });
+  }
+  const staleConnector = (await db.connectorSync.toArray()).filter(
+    (r) => r.syncStatus === 'syncing',
+  );
+  for (const row of staleConnector) {
+    await saveConnectorSync({ ...row, syncStatus: 'pending', error: undefined });
+  }
+
+  const noteIds = new Set<number>();
+  if (profile.kind === 'notion') {
+    const rows = await db.notionMappings
+      .where('syncStatus')
+      .anyOf('pending', 'error')
+      .toArray();
+    for (const r of rows) noteIds.add(r.noteId);
+  } else {
+    const rows = (await db.connectorSync.toArray()).filter(
+      (r) =>
+        r.connectorId === profile.id &&
+        (r.syncStatus === 'pending' || r.syncStatus === 'error'),
+    );
+    for (const r of rows) noteIds.add(r.noteId);
+  }
+  for (const noteId of noteIds) {
+    if (!(await getNote(noteId))) continue; // 笔记已删除：静默跳过
+    void enqueueSync(noteId).catch(() => {});
+  }
 }
 
 // 视频信息内存缓存（5min），供侧边栏轮询低成本刷新
@@ -249,7 +297,7 @@ async function resolveTargetNote(
       videoTitle: ctx.title,
       partLabel,
       owner: ctx.owner,
-      url: `https://www.bilibili.com/${ctx.bvid}${ctx.p > 1 ? `?p=${ctx.p}` : ''}`,
+      url: `https://www.bilibili.com/video/${ctx.bvid}${ctx.p > 1 ? `?p=${ctx.p}` : ''}`,
       generatedAt: new Date(),
     }),
     source: 'mixed',
@@ -258,26 +306,37 @@ async function resolveTargetNote(
   return note;
 }
 
-/** 完整回答写入本地课程笔记：按最新 revision 幂等追加（§5.6），再广播 + 防抖同步 */
+/** 完整回答写入本地课程笔记：读最新行 → 幂等追加问答块（§5.6）→ CAS 写回；
+ *  与编辑器并发冲突时按最新行重放（appendQaBlock 按 chatEntryId 幂等），最多 3 次。
+ *  成功后广播 + 防抖同步 */
 async function appendTurnToNote(
   session: ChatSession,
   turn: ChatTurn,
   ctx: VideoContextInfo,
 ): Promise<NoteRow> {
   const target = await resolveTargetNote(session, ctx);
-  const latest = await getNote(target.id!);
-  if (!latest) throw new Error('目标笔记不存在');
-  const contentMd = appendQaBlock(latest.contentMd, {
-    chatEntryId: turn.id,
-    anchorTime: turn.anchorTime,
-    question: turn.question,
-    answerMd: turn.answerMd,
-  });
-  await saveNote(latest.id!, { contentMd });
-  await updateTurn(turn.id, { noteWriteStatus: 'written', noteEntryId: turn.id });
-  broadcastNoteChanged(latest.id!);
-  scheduleChatSync(latest.id!);
-  return latest;
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; ; attempt++) {
+    const latest = await getNote(target.id!);
+    if (!latest) throw new Error('目标笔记不存在');
+    const contentMd = appendQaBlock(latest.contentMd, {
+      chatEntryId: turn.id,
+      anchorTime: turn.anchorTime,
+      question: turn.question,
+      answerMd: turn.answerMd,
+    });
+    try {
+      const saved = await saveNoteCAS(latest.id!, { contentMd }, latest.rev ?? 1);
+      await updateTurn(turn.id, { noteWriteStatus: 'written', noteEntryId: turn.id });
+      broadcastNoteChanged(saved.id!);
+      scheduleChatSync(saved.id!);
+      return saved;
+    } catch (e) {
+      // 版本冲突：编辑器同期有写入 → 读冲突方给的最新行重放；块级幂等保证不产生重复块
+      if (e instanceof NoteRevConflict && attempt < MAX_ATTEMPTS) continue;
+      throw e;
+    }
+  }
 }
 
 /** 撤销 / 不记录：只移除该 chatEntryId 的标记块（不动同期手工编辑），再广播 + 防抖同步 */
@@ -327,7 +386,7 @@ async function handleChatAsk(
         return;
       }
       emit({ type: 'answer-delta', seq: 0, delta: dup.answerMd });
-      emit({ type: 'answer-done', turnId: dup.id, status: 'done' });
+      // C2：回放同样遵守「笔记结果在 answer-done 之前，answer-done 永远最后」
       if (dup.noteWriteStatus === 'written') {
         const topic = await getTopic(dup.topicId);
         const session = topic ? await getSession(topic.sessionId) : undefined;
@@ -341,6 +400,7 @@ async function handleChatAsk(
           });
         }
       }
+      emit({ type: 'answer-done', turnId: dup.id, status: 'done' });
       return;
     }
 
@@ -357,17 +417,22 @@ async function handleChatAsk(
       p: ctx.p,
       title: ctx.title,
       playbackTime: playbackTime ?? 0,
-      pageUrl: `https://www.bilibili.com/${ctx.bvid}${ctx.p > 1 ? `?p=${ctx.p}` : ''}`,
+      pageUrl: `https://www.bilibili.com/video/${ctx.bvid}${ctx.p > 1 ? `?p=${ctx.p}` : ''}`,
     };
 
     // 2. 会话 + 话题（连续追问沿用原话题与原始锚点；updateAnchor 重置到当前进度）
     const session = await getOrCreateSession(ctx.bvid, ctx.cid);
     let topic: ChatTopic | undefined;
     if (msg.topicId) {
-      topic = await getTopic(msg.topicId);
-      if (topic && msg.updateAnchor) {
-        await updateTopic(topic.id, { anchorTime: snapshot.playbackTime });
-        topic = { ...topic, anchorTime: snapshot.playbackTime };
+      const found = await getTopic(msg.topicId);
+      // P1.2：只接受属于当前会话的话题 —— 陈旧/跨课程的 topicId 一律忽略并新建，
+      // 自动纠正，绝不让轮次落到别的话题里
+      if (found && found.sessionId === session.id) {
+        topic = found;
+        if (msg.updateAnchor) {
+          await updateTopic(topic.id, { anchorTime: snapshot.playbackTime });
+          topic = { ...topic, anchorTime: snapshot.playbackTime };
+        }
       }
     }
     if (!topic) {
@@ -421,7 +486,12 @@ async function handleChatAsk(
         sendPlaybackMeta: prefs.privacySendPlaybackMeta,
       },
     });
-    emit({ type: 'context-ready', snapshot: anchoredSnapshot, completeness: chatCtx.completeness });
+    emit({
+      type: 'context-ready',
+      snapshot: anchoredSnapshot,
+      completeness: chatCtx.completeness,
+      topicId: topic.id,
+    });
 
     const profile = await getActiveProfile();
     if (!profile) {
@@ -462,25 +532,47 @@ async function handleChatAsk(
     let answer = '';
     let seq = 0;
     const messages = buildChatMessages(chatCtx, msg.question);
-    const streamAnswer = async (tools?: unknown[]) => {
-      for await (const delta of chatStream({
+    /** 单轮流式请求：delta 实时透传给面板，返回结构化结局（含收集到的 tool_calls） */
+    const streamRound = async (
+      roundMessages: ChatMessage[],
+      tools?: unknown[],
+    ): Promise<ChatStreamOutcome> => {
+      const gen = chatStream({
         baseURL: profile.baseURL,
         apiKey: profile.apiKey,
         model: profile.defaultModel,
-        messages,
+        messages: roundMessages,
         signal,
         ...(tools ? { tools } : {}),
-      })) {
-        answer += delta;
-        emit({ type: 'answer-delta', seq: seq++, delta });
+      });
+      let step = await gen.next();
+      while (!step.done) {
+        answer += step.value;
+        emit({ type: 'answer-delta', seq: seq++, delta: step.value });
+        step = await gen.next();
+      }
+      if (step.value.truncatedByLength || step.value.filtered) {
+        console.warn('[bilinote] chat stream finished with', step.value.finishReason);
+      }
+      return step.value;
+    };
+    /** 无 tools 的纯文本轮：仍返回 tool_calls 则按「不支持」错误处理（保持旧语义） */
+    const streamPlain = async () => {
+      const outcome = await streamRound(messages);
+      if (outcome.toolCalls.length > 0) {
+        throw new LLMError(
+          'tool_calls',
+          '模型返回了客户端工具调用（tool_calls），当前无法执行',
+        );
       }
     };
     try {
       if (searchPlan === 'attempt') {
-        // 已知支持联网的 Provider：带 tools 尝试；被拒（或返回 tool_calls）按模式降级/报错
+        // 已知支持联网的 Provider：带 tools 尝试；Kimi 内置 $web_search 走协议循环，
+        // 被拒（或返回无法执行的工具）按模式降级/报错
         emit({ type: 'tool-start', kind: 'web_search', provider: profile.name });
         try {
-          await streamAnswer(webSearchTools ?? undefined);
+          await runBuiltinToolLoop(messages, webSearchTools ?? undefined, streamRound);
           emit({ type: 'tool-done', kind: 'web_search' });
         } catch (e) {
           const toolUnsupported =
@@ -500,7 +592,7 @@ async function handleChatAsk(
             message: '当前模型不支持联网，已仅基于课程回答',
           });
           answer = '';
-          await streamAnswer();
+          await streamPlain();
         }
       } else {
         if (searchPlan === 'unsupported') {
@@ -511,7 +603,7 @@ async function handleChatAsk(
             message: '当前模型不支持联网，已仅基于课程回答',
           });
         }
-        await streamAnswer();
+        await streamPlain();
       }
     } catch (e) {
       if (e instanceof LLMError && e.kind === 'aborted') {
@@ -529,8 +621,8 @@ async function handleChatAsk(
     // 6. 完成：剥离可能的思考过程（推理型模型常见）后持久化 Turn → 自动记录（§5.6）
     const { answer: finalAnswer } = stripThinking(answer);
     await updateTurn(turn.id, { answerMd: finalAnswer, status: 'done' });
-    emit({ type: 'answer-done', turnId: turn.id, status: 'done' });
 
+    // C2：先出笔记写入结果（成功 / 失败 / 跳过无事件），answer-done 永远最后
     if (prefs.chatAutoRecord && session.autoRecord) {
       try {
         const note = await appendTurnToNote(session, { ...turn, answerMd: finalAnswer }, ctx);
@@ -549,6 +641,7 @@ async function handleChatAsk(
     } else {
       await updateTurn(turn.id, { noteWriteStatus: 'skipped' });
     }
+    emit({ type: 'answer-done', turnId: turn.id, status: 'done' });
   } catch (e) {
     emit({ type: 'error', message: errorMessage(e) });
   }
@@ -559,6 +652,9 @@ export default defineBackground(() => {
   void browser.sidePanel
     ?.setPanelBehavior({ openPanelOnActionClick: true })
     ?.catch(() => {});
+
+  // P2：同步防抖/队列只在内存 —— SW 重启后恢复：syncing 归位 pending，pending/error 重新入队
+  void rehydrateSyncQueue().catch(() => {});
 
   browser.runtime.onMessage.addListener((msg: BgRequest, _sender, sendResponse) => {
     (async () => {
@@ -758,17 +854,18 @@ export default defineBackground(() => {
       const signal = abort.signal;
 
       void (async () => {
-        try {
-          const profile = await getActiveProfile();
-          if (!profile) {
-            port.postMessage({
-              type: 'error',
-              message: '尚未配置模型：请先在扩展设置页添加模型服务（baseURL + API Key）',
-            });
-            return;
+        // C1：终态事件全部绑定视频身份，UI 丢弃与当前页不匹配的事件；
+        // cid=0 表示视频信息尚未解析（仅极早期错误），解析成功后即修正为真实值
+        const scope = { bvid: raw.bvid, cid: 0, p: raw.p || 1 };
+        const emitScoped = (e: AnalyzePortEvent) => {
+          try {
+            port.postMessage(e);
+          } catch {
+            /* 面板已关闭 */
           }
-          const modelId = `${profile.name}/${profile.defaultModel}`;
-
+        };
+        try {
+          // 先解析视频身份，保证后续所有事件（含「未配置模型」错误）都带完整 scope
           const info = await getVideoInfoCached(raw.bvid);
           await upsertVideo({
             bvid: info.bvid,
@@ -783,13 +880,28 @@ export default defineBackground(() => {
           const page = info.pages[p - 1] ?? info.pages[0];
           if (!page) throw new Error('无法解析视频分P信息');
           const cid = page.cid;
+          scope.bvid = info.bvid;
+          scope.cid = cid;
+          scope.p = p;
           const duration = page.duration || info.duration;
           const partTitle = info.pages.length > 1 ? page.part : '';
+
+          const profile = await getActiveProfile();
+          if (!profile) {
+            emitScoped({
+              type: 'error',
+              message: '尚未配置模型：请先在扩展设置页添加模型服务（baseURL + API Key）',
+              ...scope,
+            });
+            return;
+          }
+          // C5：缓存键绑定完整模型身份（名称/模型@服务地址），换服务或同名不同源不串缓存
+          const modelId = `${profile.name}/${profile.defaultModel}@${profile.baseURL}`;
 
           if (!raw.force) {
             const cached = await getCachedSummary(raw.bvid, cid, modelId);
             if (cached) {
-              port.postMessage({ type: 'done-cached', result: cached.result });
+              emitScoped({ type: 'done-cached', result: cached.result, ...scope });
               return;
             }
           }
@@ -799,7 +911,7 @@ export default defineBackground(() => {
           if (!cues) {
             const sub = await getSubtitleCues(raw.bvid, cid, { aid: info.aid });
             if (!sub || sub.cues.length === 0) {
-              port.postMessage({ type: 'no-subtitle' });
+              emitScoped({ type: 'no-subtitle', ...scope });
               return;
             }
             await saveSubtitle({
@@ -840,20 +952,25 @@ export default defineBackground(() => {
             danmaku,
             signal,
             onProgress: (e) => {
-              try {
-                port.postMessage(e);
-              } catch {
-                /* 面板已关闭 */
-              }
+              // P1.8：done 不直接透传 —— 先落缓存，成功后才由下方发出（失败则报 error）
+              if (e.type === 'done') return;
+              emitScoped({ ...e, ...scope });
             },
           });
-          await saveSummary({ bvid: raw.bvid, cid, modelId, result, createdAt: Date.now() });
-        } catch (e) {
+          // P1.8：先持久化再报完成；缓存写失败 → error 而不是 done
           try {
-            port.postMessage({ type: 'error', message: errorMessage(e) });
-          } catch {
-            /* 面板已关闭 */
+            await saveSummary({ bvid: raw.bvid, cid, modelId, result, createdAt: Date.now() });
+          } catch (saveErr) {
+            emitScoped({
+              type: 'error',
+              message: `分析完成，但缓存写入失败：${errorMessage(saveErr)}`,
+              ...scope,
+            });
+            return;
           }
+          emitScoped({ type: 'done', result, ...scope });
+        } catch (e) {
+          emitScoped({ type: 'error', message: errorMessage(e), ...scope });
         }
       })();
     });

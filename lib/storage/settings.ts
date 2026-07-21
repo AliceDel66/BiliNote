@@ -89,6 +89,8 @@ export interface NotionConfig {
   token: string;
   /** 验证成功后缓存的集成（bot）名称 */
   botName?: string;
+  /** 验证成功后缓存的集成（bot）id（users/me 返回；mapping scope 校验用，可选） */
+  botId?: string;
   /** 用户选择的同步根页面 */
   rootPageId?: string;
   rootPageTitle?: string;

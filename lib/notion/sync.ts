@@ -12,10 +12,17 @@
  * 重新生成并追加块。不做逐块 diff：实现简单、结果可预期，代价是该页在
  * Notion 侧的块历史会随每次同步重建。
  *
- * 冲突检测：写入前 GET 目标页；若其 last_edited_time 晚于上次同步时间，
- * 且本地笔记在上次同步后也有修改（note.updatedAt > lastSyncedAt），判定
- * 双方都改过 → 状态置为 conflict，不写任何内容；调用方传 force:true 可
- * 强制覆盖。仅远端改过（本地未动）不算冲突，按本地内容覆盖。
+ * 冲突检测：以持久化的 `notionLastEditedTime`（上次同步完成后 Notion 页面的
+ * last_edited_time）为基线 —— 写入前 GET 目标页，若其 last_edited_time 与基线
+ * 不同（远端被改过），且本地笔记在上次同步后也有修改（note.updatedAt >
+ * lastSyncedAt），判定双方都改过 → 状态置为 conflict，不写任何内容；调用方传
+ * force:true 可强制覆盖。仅远端改过（本地未动）不算冲突，按本地内容覆盖。
+ * 绝不拿远端时间跟本地时钟比较（时钟偏差会误判）。
+ *
+ * 映射 scope（C4）：映射行记录 rootPageId（及可选 botId）。仅当映射的
+ * rootPageId 与当前配置的同步根页面一致（botId 双侧都已知时也一致）时才复用
+ * 其中的课程页/章节页 id；否则在该根页面下重建页面树并写入新映射 —— 旧根页面
+ * 下的既有内容不动。
  */
 import type { NoteRow, NotionMappingRow } from '../storage/db';
 import { NotionError, type NotionClient } from './client';
@@ -31,8 +38,11 @@ export interface SyncStorage {
   >;
   getMapping(noteId: number): Promise<NotionMappingRow | undefined>;
   saveMapping(row: NotionMappingRow): Promise<void>;
-  /** 同视频已有笔记建过的课程页（避免每个分 P 重复建课程页） */
-  findCoursePageId(bvid: string): Promise<string | undefined>;
+  /** 同视频已有笔记在同一 scope 下建过的课程页（避免每个分 P 重复建课程页） */
+  findCoursePageId(
+    bvid: string,
+    scope: { rootPageId: string; botId?: string },
+  ): Promise<string | undefined>;
   /** 同步成功后清除笔记 dirty 标记 */
   markNoteClean(noteId: number): Promise<void>;
 }
@@ -40,6 +50,8 @@ export interface SyncStorage {
 export interface SyncNoteParams {
   client: NotionClient;
   rootPageId: string;
+  /** 集成 bot id（users/me）；可选 —— 与映射双侧都已知时才参与 scope 校验 */
+  botId?: string;
   noteId: number;
   force?: boolean;
   storage: SyncStorage;
@@ -57,14 +69,23 @@ function errorText(e: unknown): string {
 export async function syncNoteToNotion(
   params: SyncNoteParams,
 ): Promise<NotionMappingRow> {
-  const { client, rootPageId, force, storage } = params;
+  const { client, rootPageId, botId, force, storage } = params;
   const note = await storage.getNote(params.noteId);
   if (!note?.id) throw new Error('笔记不存在或已被删除');
   const noteId = note.id;
 
   const existing = await storage.getMapping(noteId);
-  const base: NotionMappingRow = existing ?? {
+  // C4：只有与当前同步根页面同 scope 的映射才可复用页面 id；
+  // 换了根页面（或升级前的旧映射无 rootPageId）→ 重建页面树、写新映射，旧树内容不动
+  const inScope = (m: NotionMappingRow | undefined): m is NotionMappingRow =>
+    !!m &&
+    m.rootPageId === rootPageId &&
+    (!botId || !m.botId || m.botId === botId);
+  const scoped = inScope(existing) ? existing : undefined;
+  const base: NotionMappingRow = scoped ?? {
     noteId,
+    rootPageId,
+    ...(botId ? { botId } : {}),
     lastSyncedAt: 0,
     notionLastEditedTime: '',
     syncStatus: 'pending',
@@ -102,10 +123,13 @@ export async function syncNoteToNotion(
         : partTitle
       : '';
 
-    // 1. 确保课程页存在（优先复用同视频其他笔记建过的）
+    // 1. 确保课程页存在（优先复用同视频其他笔记在同一 scope 下建过的）
     let courseReused = !!coursePageId;
     if (!coursePageId) {
-      coursePageId = await storage.findCoursePageId(note.bvid);
+      coursePageId = await storage.findCoursePageId(note.bvid, {
+        rootPageId,
+        ...(botId ? { botId } : {}),
+      });
       courseReused = !!coursePageId;
     }
     if (!coursePageId) {
@@ -123,15 +147,14 @@ export async function syncNoteToNotion(
     }
     const targetPageId = chapterPageId ?? coursePageId;
 
-    // 3. 冲突检测（仅针对已同步过的页面；新建的页面不可能有外部编辑）
-    if (existing && base.lastSyncedAt > 0 && !force) {
+    // 3. 冲突检测（仅针对同 scope 且已同步过的页面；新建的页面不可能有外部编辑）
+    if (scoped && base.lastSyncedAt > 0 && !force) {
       const page = await client.getPage(targetPageId);
-      const remoteEditedAt = Date.parse(page.lastEditedTime);
-      if (
-        Number.isFinite(remoteEditedAt) &&
-        remoteEditedAt > base.lastSyncedAt &&
-        note.updatedAt > base.lastSyncedAt
-      ) {
+      // 基线语义：远端是否被改，只跟持久化基线 notionLastEditedTime 比（字符串原样比较），
+      // 不拿远端时间跟本地时钟比 —— 时钟偏差不该造成误判
+      const remoteChanged = page.lastEditedTime !== base.notionLastEditedTime;
+      const localChanged = note.updatedAt > base.lastSyncedAt;
+      if (remoteChanged && localChanged) {
         const row: NotionMappingRow = {
           ...base,
           coursePageId,
