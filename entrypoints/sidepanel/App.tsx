@@ -41,6 +41,7 @@ import {
   saveNoteCAS,
   type NoteRow,
   type NotionMappingRow,
+  type SubtitleSource,
 } from '../../lib/storage';
 import {
   ANALYZE_PORT,
@@ -121,6 +122,8 @@ export default function App() {
   /** 结果绑定的视频身份（C1）：done/done-cached 事件携带，缺省回退到发起分析时的上下文 */
   const [resultId, setResultId] = useState<VideoIdentity | null>(null);
   const [cached, setCached] = useState(false);
+  /** 本次结果所用字幕来源（done/done-cached 携带；'stt' 时展示「字幕为 AI 转写」徽章） */
+  const [subtitleSource, setSubtitleSource] = useState<SubtitleSource | null>(null);
   const [error, setError] = useState('');
   const [progress, setProgress] = useState<ProgressState>({ text: '', streamText: '', pct: 0 });
   const portRef = useRef<Browser.runtime.Port | null>(null);
@@ -189,7 +192,7 @@ export default function App() {
     portRef.current = null;
   };
 
-  const analyze = (force: boolean) => {
+  const analyze = (force: boolean, transcribe = false) => {
     const c = ctxRef.current;
     if (!c) return;
     stopPort();
@@ -197,8 +200,13 @@ export default function App() {
     setResult(null);
     setResultId(null);
     setCached(false);
+    setSubtitleSource(null);
     setError('');
-    setProgress({ text: '准备中…', streamText: '', pct: 0 });
+    setProgress({
+      text: transcribe ? '准备语音转写…' : '准备中…',
+      streamText: '',
+      pct: 0,
+    });
 
     const port = browser.runtime.connect({ name: ANALYZE_PORT });
     portRef.current = port;
@@ -232,14 +240,31 @@ export default function App() {
         case 'reduce-delta':
           setProgress((p) => ({ ...p, streamText: e.text }));
           break;
+        case 'transcribe-stage':
+          // STT 阶段进度：download 有真实百分比；stt / saving 为不定进度（保留当前进度条）
+          setProgress((p) => ({
+            ...p,
+            text:
+              e.stage === 'download'
+                ? `下载音频 ${Math.round(e.percent ?? 0)}%…`
+                : e.stage === 'stt'
+                  ? '语音转写中…'
+                  : '写入字幕缓存…',
+            ...(e.stage === 'download' && typeof e.percent === 'number'
+              ? { pct: e.percent }
+              : {}),
+          }));
+          break;
         case 'done':
           captureResultId(e);
+          setSubtitleSource(e.subtitleSource ?? null);
           setResult(e.result);
           setStatus('done');
           stopPort();
           break;
         case 'done-cached':
           captureResultId(e);
+          setSubtitleSource(e.subtitleSource ?? null);
           setResult(e.result);
           setCached(true);
           setStatus('done');
@@ -259,7 +284,13 @@ export default function App() {
     port.onDisconnect.addListener(() => {
       portRef.current = null;
     });
-    port.postMessage({ type: 'analyze', bvid: c.bvid, p: c.p, force });
+    port.postMessage({
+      type: 'analyze',
+      bvid: c.bvid,
+      p: c.p,
+      force,
+      ...(transcribe ? { transcribe: true } : {}),
+    });
   };
 
   const cancel = () => {
@@ -703,6 +734,18 @@ export default function App() {
                 <Button
                   variant="ghost"
                   size="sm"
+                  onClick={() => analyze(true, true)}
+                  className="w-full"
+                >
+                  <SparklesIcon size={12} />
+                  使用语音转写（Beta）
+                </Button>
+                <p className="text-[11px] text-ink-3 dark:text-ink-3-dark">
+                  语音转写：拉取视频音轨，发送到你在设置页配置的转写服务（音频将发送至该服务）。
+                </p>
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => analyze(true)}
                   className="w-full"
                 >
@@ -749,6 +792,7 @@ export default function App() {
                   {cached ? '缓存结果' : '分析完成'}
                   {result.tokenUsage && ` · 输入约 ${result.tokenUsage.estimatedInput} tokens`}
                 </span>
+                {subtitleSource === 'stt' && <Badge tone="neutral">字幕为 AI 转写</Badge>}
               </span>
               <button
                 type="button"

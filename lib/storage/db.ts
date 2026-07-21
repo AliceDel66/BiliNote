@@ -19,12 +19,15 @@ export interface VideoRow {
   lastViewedAt: number;
 }
 
+/** 字幕来源：UP 主人工 / B站 AI 字幕 / 语音转写（STT，无字幕视频的转写路径） */
+export type SubtitleSource = 'human' | 'ai' | 'stt';
+
 export interface SubtitleRow {
   id?: number;
   bvid: string;
   cid: number;
   lang: string;
-  source: 'human' | 'ai';
+  source: SubtitleSource;
   cues: Cue[];
   fetchedAt: number;
 }

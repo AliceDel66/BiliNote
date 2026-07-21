@@ -2,11 +2,11 @@
  * 设置页「知识库连接」目录卡（讨论稿 §2：Notion 只是内置预设之一）。
  *
  * - 已配置列表：kind 图标 + 名称 + 状态徽章 + 连接状态 + 默认写入单选 + 测试/配置/移除；
- * - 添加连接：7 个模板 tile（Notion / ima / 腾讯文档 / 飞书文档 /
- *   Custom Remote MCP / Obsidian / 语雀本地 MCP），点击展开对应行内表单；
+ * - 添加连接：7 个模板 tile（Notion / ima / 语雀 / 腾讯文档 / 飞书文档 /
+ *   Custom Remote MCP / Obsidian），点击展开对应行内表单；
  * - 腾讯文档：官方端点预填、Token 以原始值放 Authorization 头（authScheme raw）；
- *   飞书文档：个人 MCP URL 即凭据（authScheme none）；语雀：local-mcp，经本机
- *   bridge mcp-proxy 把 Python stdio 服务（yuque-mcp）代理成 HTTP；
+ *   飞书文档：个人 MCP URL 即凭据（authScheme none）；语雀：官方 OpenAPI 直连；
+ *   既存 local-mcp profile 仅保留 Legacy 配置入口，不再出现在新增目录；
  * - Notion 表单即原「Notion 集成」令牌 + 根页面流程（配置仍存 NotionConfig，行为不变）。
  */
 import { useCallback, useEffect, useState } from 'react';
@@ -25,7 +25,9 @@ import {
   DEFAULT_BRIDGE_PORT,
   DEFAULT_LOCAL_MCP_PORT,
   IMA_API_ORIGIN,
+  YUQUE_DEFAULT_HOST,
   listConnectorProfiles,
+  normalizeYuqueHost,
   originPatternOf,
   removeConnectorProfile,
   saveConnectorProfile,
@@ -38,6 +40,7 @@ import {
   type ConnectorStatus,
   type ConnectorTestResult,
   type ImaKnowledgeBase,
+  type YuqueKnowledgeBase,
 } from '../../lib/connectors';
 import {
   clearNotionConfig,
@@ -90,6 +93,8 @@ function presetOfProfile(p: ConnectorProfile): ConnectorPreset {
       return byId('notion');
     case 'ima':
       return byId('ima');
+    case 'yuque':
+      return byId('yuque');
     case 'remote-mcp':
       return byId(p.config.authScheme === 'none' ? 'feishu-docs' : 'tencent-docs');
     case 'custom-mcp':
@@ -97,7 +102,14 @@ function presetOfProfile(p: ConnectorProfile): ConnectorPreset {
     case 'local-bridge':
       return byId('obsidian');
     case 'local-mcp':
-      return byId('yuque');
+      return {
+        id: 'legacy-local-mcp',
+        kind: 'local-mcp',
+        label: 'Local MCP（Legacy）',
+        status: 'beta',
+        defaultName: '本地 MCP（Legacy）',
+        desc: '旧版 profile：经本机 bridge mcp-proxy 接入 stdio MCP 服务',
+      };
   }
 }
 
@@ -569,7 +581,253 @@ function ImaConfigForm({
   );
 }
 
-// ---------- 通用连接配置表单（按预设区分：腾讯文档 / 飞书文档 / 自定义 MCP / Obsidian / 语雀） ----------
+// ---------- 语雀官方 OpenAPI 配置表单 ----------
+
+function YuqueConfigForm({
+  profile,
+  onDone,
+  onCancel,
+}: {
+  profile?: ConnectorProfile;
+  onDone: () => Promise<void>;
+  onCancel: () => void;
+}) {
+  const preset = CONNECTOR_PRESETS.find((item) => item.id === 'yuque')!;
+  const [name, setName] = useState(profile?.name ?? preset.defaultName);
+  const [host, setHost] = useState(String(profile?.config.host ?? YUQUE_DEFAULT_HOST));
+  const [token, setToken] = useState(String(profile?.config.token ?? ''));
+  const [repoId, setRepoId] = useState(String(profile?.config.repoId ?? ''));
+  const [repoName, setRepoName] = useState(String(profile?.config.repoName ?? ''));
+  const [repos, setRepos] = useState<YuqueKnowledgeBase[]>(() =>
+    repoId && repoName ? [{ id: repoId, name: repoName }] : [],
+  );
+  const [msg, setMsg] = useState<Msg>(null);
+  const [busy, setBusy] = useState(false);
+
+  const validateCredentials = (): string | null => {
+    if (!token.trim()) return '请填写语雀 API Token';
+    try {
+      normalizeYuqueHost(host);
+    } catch (e) {
+      return (e as Error).message;
+    }
+    return null;
+  };
+
+  const validate = (): string | null => {
+    const credentialsError = validateCredentials();
+    if (credentialsError) return credentialsError;
+    if (!repoId) return '请先读取并选择一个语雀知识库';
+    return null;
+  };
+
+  const requestYuqueOrigin = async (): Promise<void> => {
+    const origin = normalizeYuqueHost(host);
+    await requestOriginQuiet([`${origin}/*`]);
+  };
+
+  const buildProfile = (): Omit<ConnectorProfile, 'id' | 'createdAt'> & { id?: string } => ({
+    ...(profile ? { id: profile.id } : {}),
+    kind: 'yuque',
+    name: name.trim() || preset.defaultName,
+    status: preset.status,
+    config: {
+      token: token.trim(),
+      host: normalizeYuqueHost(host),
+      repoId,
+      repoName,
+    },
+  });
+
+  const onLoadKnowledgeBases = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const invalid = validateCredentials();
+      if (invalid) {
+        setMsg({ kind: 'err', text: invalid });
+        return;
+      }
+      await requestYuqueOrigin();
+      const items = (await callBg({
+        type: 'yuqueListKnowledgeBases',
+        token: token.trim(),
+        host: normalizeYuqueHost(host),
+      })) as YuqueKnowledgeBase[];
+      setRepos(items);
+      const current = items.find((item) => item.id === repoId);
+      if (current) {
+        setRepoName(current.name);
+      } else if (items.length === 1) {
+        setRepoId(items[0].id);
+        setRepoName(items[0].name);
+      } else if (repoId) {
+        setRepoId('');
+        setRepoName('');
+      }
+      setMsg(
+        items.length > 0
+          ? { kind: 'ok', text: `已读取 ${items.length} 个知识库` }
+          : { kind: 'err', text: '当前账号没有可访问的语雀知识库' },
+      );
+    } catch (e) {
+      setMsg({ kind: 'err', text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onTest = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const invalid = validate();
+      if (invalid) {
+        setMsg({ kind: 'err', text: invalid });
+        return;
+      }
+      await requestYuqueOrigin();
+      const draft = { ...buildProfile(), id: 'draft', createdAt: 0 };
+      const result = (await callBg({ type: 'connectorTest', profile: draft })) as ConnectorTestResult;
+      setMsg({ kind: result.ok ? 'ok' : 'err', text: result.detail });
+    } catch (e) {
+      setMsg({ kind: 'err', text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onSave = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const invalid = validate();
+      if (invalid) {
+        setMsg({ kind: 'err', text: invalid });
+        return;
+      }
+      await requestYuqueOrigin();
+      await saveConnectorProfile(buildProfile());
+      await onDone();
+    } catch (e) {
+      setMsg({ kind: 'err', text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3 rounded-[10px] border border-line dark:border-line-dark p-3">
+      <label className="block text-xs font-medium text-ink-2 dark:text-ink-2-dark">
+        名称
+        <Input className="mt-1" value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+
+      <label className="block text-xs font-medium text-ink-2 dark:text-ink-2-dark">
+        空间 Host
+        <Input
+          className="mt-1 font-mono"
+          placeholder={YUQUE_DEFAULT_HOST}
+          value={host}
+          onChange={(e) => {
+            setHost(e.target.value);
+            setRepos([]);
+            setRepoId('');
+            setRepoName('');
+          }}
+        />
+      </label>
+
+      <label className="block text-xs font-medium text-ink-2 dark:text-ink-2-dark">
+        API Token
+        <Input
+          className="mt-1 font-mono"
+          type="password"
+          placeholder="语雀个人或团队 API Token"
+          value={token}
+          onChange={(e) => {
+            setToken(e.target.value);
+            setRepos([]);
+            setRepoId('');
+            setRepoName('');
+          }}
+        />
+      </label>
+
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="block min-w-52 flex-1 text-xs font-medium text-ink-2 dark:text-ink-2-dark">
+          写入知识库
+          <select
+            className="mt-1 h-9 w-full rounded-lg border border-line-2 dark:border-line-2-dark bg-card dark:bg-card-dark px-3 text-sm text-ink dark:text-ink-dark outline-none transition-colors duration-150 focus:border-brand-500 focus:ring-2 focus:ring-brand-ring dark:focus:ring-brand-ring-dark"
+            value={repoId}
+            onChange={(e) => {
+              const selected = repos.find((item) => item.id === e.target.value);
+              setRepoId(e.target.value);
+              setRepoName(selected?.name ?? '');
+            }}
+          >
+            <option value="">请选择语雀知识库</option>
+            {repos.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+                {item.namespace ? `（${item.namespace}）` : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy || !token.trim()}
+          onClick={() => void onLoadKnowledgeBases()}
+        >
+          {busy ? '读取中…' : '读取知识库'}
+        </Button>
+      </div>
+
+      <p className="text-xs text-ink-2 dark:text-ink-2-dark">
+        从{' '}
+        <a
+          href="https://www.yuque.com/settings/tokens"
+          target="_blank"
+          rel="noreferrer"
+          className="text-brand-600 dark:text-brand-300 underline"
+        >
+          语雀开发者设置
+        </a>{' '}
+        获取 Token。个人 Token 使用默认 Host；绑定空间的团队 Token 填对应
+        https://&lt;space&gt;.yuque.com。凭据仅保存在本机，并只发送到确认后的 yuque.com
+        精确域名。
+      </p>
+
+      {msg && (
+        <p
+          className={`text-xs ${
+            msg.kind === 'ok'
+              ? 'text-emerald-600 dark:text-emerald-400'
+              : 'text-red-600 dark:text-red-400'
+          }`}
+        >
+          {msg.text}
+        </p>
+      )}
+
+      <div className="flex flex-wrap gap-2 pt-1">
+        <Button variant="ghost" size="sm" disabled={busy} onClick={() => void onTest()}>
+          连接测试
+        </Button>
+        <Button variant="primary" size="sm" disabled={busy} onClick={() => void onSave()}>
+          保存连接
+        </Button>
+        <Button variant="link" size="sm" onClick={onCancel}>
+          取消
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- 通用连接配置表单（腾讯文档 / 飞书文档 / 自定义 MCP / Obsidian / Legacy Local MCP） ----------
 
 function ConnectorForm({
   preset,
@@ -582,7 +840,8 @@ function ConnectorForm({
   onDone: () => Promise<void>;
   onCancel: () => void;
 }) {
-  const defaultPort = preset.id === 'yuque' ? DEFAULT_LOCAL_MCP_PORT : DEFAULT_BRIDGE_PORT;
+  const defaultPort =
+    preset.id === 'legacy-local-mcp' ? DEFAULT_LOCAL_MCP_PORT : DEFAULT_BRIDGE_PORT;
   const [name, setName] = useState(profile?.name ?? preset.defaultName);
   const [endpoint, setEndpoint] = useState(
     String(
@@ -639,8 +898,6 @@ function ConnectorForm({
         return { endpoint: endpoint.trim(), authScheme: 'none' };
       case 'custom-mcp':
         return { endpoint: endpoint.trim(), ...(token.trim() ? { token: token.trim() } : {}) };
-      case 'yuque':
-        return { port: Number(port) || defaultPort, token: token.trim() };
       default:
         return { port: Number(port) || defaultPort, token: token.trim() };
     }
@@ -799,9 +1056,9 @@ function ConnectorForm({
               />
             </label>
           </div>
-          {preset.id === 'yuque' ? (
+          {preset.id === 'legacy-local-mcp' ? (
             <div className="space-y-1 text-xs text-ink-2 dark:text-ink-2-dark">
-              <p>语雀 MCP 是 Python stdio 服务，需经本机 bridge 代理后供扩展连接：</p>
+              <p>旧版 Local MCP profile 仍需本机 bridge 代理；新配置请改用语雀官方 OpenAPI：</p>
               <p>
                 ① 安装 yuque-mcp：
                 <span className="font-mono"> pip install -e . </span>（或
@@ -954,7 +1211,7 @@ export default function ConnectorsSection() {
       <Card>
         <SectionTitle icon={<DatabaseIcon />} title="知识库连接" />
         <p className="mb-3 text-xs text-ink-2 dark:text-ink-2-dark">
-          Notion 只是内置预设之一；内置 7 个连接预设（ima / 在线文档 / 自定义 MCP / Obsidian），默认写入目标单选。
+          Notion 只是内置预设之一；内置 7 个连接预设（ima / 语雀 / 在线文档 / 自定义 MCP / Obsidian），默认写入目标单选。
         </p>
 
         {profiles.length === 0 && (
@@ -1042,6 +1299,12 @@ export default function ConnectorsSection() {
                         onDone={onFormDone}
                         onCancel={() => setEditingId(null)}
                       />
+                    ) : p.kind === 'yuque' ? (
+                      <YuqueConfigForm
+                        profile={p}
+                        onDone={onFormDone}
+                        onCancel={() => setEditingId(null)}
+                      />
                     ) : (
                       <ConnectorForm
                         preset={presetOfProfile(p)}
@@ -1103,6 +1366,8 @@ export default function ConnectorsSection() {
               </div>
             ) : addingPreset.kind === 'ima' ? (
               <ImaConfigForm onDone={onFormDone} onCancel={() => setAdding(null)} />
+            ) : addingPreset.kind === 'yuque' ? (
+              <YuqueConfigForm onDone={onFormDone} onCancel={() => setAdding(null)} />
             ) : (
               <ConnectorForm
                 preset={addingPreset}

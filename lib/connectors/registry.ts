@@ -10,6 +10,7 @@ import { browser } from 'wxt/browser';
 import { getNotionConfig } from '../storage/settings';
 import { createNotionConnector } from './notionConnector';
 import { createImaConnector } from './imaConnector';
+import { createYuqueConnector } from './yuqueConnector';
 import { createMcpConnector } from './mcpConnector';
 import { createBridgeConnector } from './bridgeConnector';
 import {
@@ -181,6 +182,8 @@ export function buildConnector(
       return createNotionConnector(profile, deps);
     case 'ima':
       return createImaConnector(profile, deps);
+    case 'yuque':
+      return createYuqueConnector(profile, deps);
     case 'remote-mcp':
     case 'custom-mcp':
     case 'local-mcp':

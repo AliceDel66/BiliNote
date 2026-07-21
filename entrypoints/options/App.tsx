@@ -21,14 +21,18 @@ import {
 } from '../../components/icons';
 import {
   addProfile,
+  clearSttConfig,
   db,
   getPrefs,
   getProfiles,
+  getSttConfig,
   removeProfile,
+  saveSttConfig,
   setPrefs,
   updateProfile,
   type ModelProfile,
 } from '../../lib/storage';
+import { isSttConfig } from '../../lib/transcribe';
 import { insecureHttpError, originPattern } from '../../lib/host-permissions';
 import ConnectorsSection from './ConnectorsSection';
 
@@ -47,6 +51,7 @@ const SECTIONS = [
   { id: 'sec-enhance', label: '分析增强' },
   { id: 'sec-chat', label: 'AI 答疑' },
   { id: 'sec-privacy', label: '数据边界' },
+  { id: 'sec-stt', label: '语音转写' },
   { id: 'sec-data', label: '数据管理' },
 ] as const;
 
@@ -106,6 +111,11 @@ export default function App() {
   const [dataBusy, setDataBusy] = useState(false);
   const [activeSection, setActiveSection] = useState<string>(SECTIONS[0].id);
 
+  // ---- 语音转写（STT，Beta）----
+  const [sttForm, setSttForm] = useState({ baseURL: '', apiKey: '', model: '' });
+  const [sttMessage, setSttMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const [sttBusy, setSttBusy] = useState(false);
+
   // 滚动随动高亮当前设置分组
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -128,7 +138,7 @@ export default function App() {
   };
 
   const reload = useCallback(async () => {
-    const [p, prefs] = await Promise.all([getProfiles(), getPrefs()]);
+    const [p, prefs, stt] = await Promise.all([getProfiles(), getPrefs(), getSttConfig()]);
     setProfiles(p);
     setActiveId(prefs.activeProfileId ?? p[0]?.id);
     setDanmaku(prefs.includeDanmaku);
@@ -136,6 +146,7 @@ export default function App() {
     setPrivSubtitles(prefs.privacySendSubtitles);
     setPrivNote(prefs.privacySendNoteExcerpt);
     setPrivMeta(prefs.privacySendPlaybackMeta);
+    if (stt) setSttForm(stt);
   }, []);
 
   useEffect(() => {
@@ -299,6 +310,74 @@ export default function App() {
   const onTogglePrivMeta = async (v: boolean) => {
     setPrivMeta(v);
     await setPrefs({ privacySendPlaybackMeta: v });
+  };
+
+  // ---- 语音转写（STT，Beta）----
+
+  const sttField = (k: 'baseURL' | 'apiKey' | 'model') => (e: { target: { value: string } }) =>
+    setSttForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const sttValid = isSttConfig(sttForm.baseURL, sttForm.apiKey, sttForm.model);
+
+  const onSttTest = async () => {
+    setSttBusy(true);
+    setSttMessage(null);
+    try {
+      // 先确保该域名的 host 权限，未授予则中止（不发起任何 API 调用）
+      if (!(await ensureHostPermission(sttForm.baseURL.trim()))) {
+        setSttMessage({ kind: 'err', text: '未获得该域名访问权限，无法连接转写服务' });
+        return;
+      }
+      const { latencyMs } = (await callBg({
+        type: 'sttTest',
+        baseURL: sttForm.baseURL.trim(),
+        apiKey: sttForm.apiKey.trim(),
+        model: sttForm.model.trim(),
+      })) as { latencyMs: number };
+      setSttMessage({ kind: 'ok', text: `连接成功（${latencyMs}ms）` });
+    } catch (e) {
+      setSttMessage({ kind: 'err', text: `连接失败：${(e as Error).message}` });
+    } finally {
+      setSttBusy(false);
+    }
+  };
+
+  const onSttSave = async () => {
+    if (!sttValid) {
+      setSttMessage({ kind: 'err', text: '请完整填写 baseURL、API Key 与模型' });
+      return;
+    }
+    // 明文 http:// 端点会泄露 Bearer Key 与音频内容：仅允许本机回环地址
+    const insecure = insecureHttpError(sttForm.baseURL.trim());
+    if (insecure) {
+      setSttMessage({ kind: 'err', text: insecure });
+      return;
+    }
+    setSttBusy(true);
+    setSttMessage(null);
+    try {
+      // 与模型配置一致：先申请该域名 host 权限（用户手势内），被拒绝则不保存
+      if (!(await ensureHostPermission(sttForm.baseURL.trim()))) {
+        setSttMessage({ kind: 'err', text: '未获得该域名访问权限，无法保存配置' });
+        return;
+      }
+      await saveSttConfig({
+        baseURL: sttForm.baseURL.trim(),
+        apiKey: sttForm.apiKey.trim(),
+        model: sttForm.model.trim(),
+      });
+      setSttMessage({ kind: 'ok', text: '已保存' });
+    } catch (e) {
+      setSttMessage({ kind: 'err', text: `保存失败：${(e as Error).message}` });
+    } finally {
+      setSttBusy(false);
+    }
+  };
+
+  const onSttClear = async () => {
+    await clearSttConfig();
+    setSttForm({ baseURL: '', apiKey: '', model: '' });
+    setSttMessage({ kind: 'ok', text: '已清除语音转写配置' });
   };
 
   // ---- 数据管理（F-08）----
@@ -634,6 +713,81 @@ export default function App() {
           </Card>
         </section>
 
+        <section id="sec-stt" className="scroll-mt-8">
+          <Card>
+            <SectionTitle icon={<SparklesIcon />} title="语音转写（Beta）" />
+            <p className="mb-3 text-xs text-ink-2 dark:text-ink-2-dark">
+              无字幕视频可走语音转写：拉取视频音轨，发送到你配置的转写服务（音频将发送至该服务）。
+              支持 Groq 等 OpenAI 兼容端点；单文件 ≤25MB。
+            </p>
+            <div className="space-y-3">
+              <label className="block text-xs font-medium text-ink-2 dark:text-ink-2-dark">
+                baseURL（OpenAI 兼容端点）
+                <Input
+                  className="mt-1 font-mono"
+                  placeholder="https://api.groq.com/openai/v1"
+                  value={sttForm.baseURL}
+                  onChange={sttField('baseURL')}
+                />
+              </label>
+              <label className="block text-xs font-medium text-ink-2 dark:text-ink-2-dark">
+                API Key
+                <Input
+                  className="mt-1 font-mono"
+                  type="password"
+                  placeholder="gsk_..."
+                  value={sttForm.apiKey}
+                  onChange={sttField('apiKey')}
+                />
+              </label>
+              <label className="block text-xs font-medium text-ink-2 dark:text-ink-2-dark">
+                模型
+                <Input
+                  className="mt-1 font-mono"
+                  placeholder="whisper-large-v3"
+                  value={sttForm.model}
+                  onChange={sttField('model')}
+                />
+              </label>
+
+              {sttMessage && (
+                <p
+                  className={`text-xs ${
+                    sttMessage.kind === 'ok'
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-red-600 dark:text-red-400'
+                  }`}
+                >
+                  {sttMessage.text}
+                </p>
+              )}
+
+              <div className="flex flex-wrap gap-2 pt-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={sttBusy || !sttValid}
+                  onClick={() => void onSttTest()}
+                >
+                  测试
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={sttBusy || !sttValid}
+                  onClick={() => void onSttSave()}
+                >
+                  <CheckIcon size={12} className="text-white" />
+                  保存
+                </Button>
+                <Button variant="link" size="sm" disabled={sttBusy} onClick={() => void onSttClear()}>
+                  清除
+                </Button>
+              </div>
+            </div>
+          </Card>
+        </section>
+
         <section id="sec-data" className="scroll-mt-8">
           <Card>
             <SectionTitle icon={<DownloadIcon />} title="数据管理" />
@@ -660,7 +814,7 @@ export default function App() {
               <p className="text-xs text-ink-2 dark:text-ink-2-dark">
                 导出为 JSON（视频 / 字幕缓存 / 总结 / 笔记 / 问答会话 /
                 同步映射与偏好），不包含 API Key 与知识库连接凭据（Notion 令牌 /
-                MCP Token 等）。清空操作需二次确认且不可恢复。
+                MCP Token / 语音转写 Key 等）。清空操作需二次确认且不可恢复。
               </p>
             </div>
           </Card>

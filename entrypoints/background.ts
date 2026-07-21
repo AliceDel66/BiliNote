@@ -9,17 +9,27 @@ import {
   getSubtitleCues,
   getVideoInfo,
   getDanmakuSample,
+  getAudioTrack,
+  downloadAudio,
   BiliApiError,
   type VideoInfo,
 } from '../lib/bilibili';
 import { chatStream, fetchModels, testConnection, LLMError } from '../lib/llm';
 import type { ChatMessage, ChatStreamOutcome } from '../lib/llm';
+import {
+  buildSilentWav,
+  isSttConfig,
+  MAX_STT_FILE_BYTES,
+  SttError,
+  transcribeAudio,
+} from '../lib/transcribe';
 import { createNotionClient, NotionError } from '../lib/notion';
 import {
   buildConnector,
   getActiveConnectorProfile,
   getTargetSyncRow,
   listImaKnowledgeBases,
+  listYuqueKnowledgeBases,
   listConnectorProfiles,
   getActiveConnectorProfileId,
   syncNoteToTarget,
@@ -46,8 +56,10 @@ import {
   getNotionConfig,
   getNotionMapping,
   getLatestConnectorSync,
+  getSttConfig,
   type ModelProfile,
   type NoteRow,
+  type SubtitleSource,
 } from '../lib/storage';
 import {
   appendQaBlock,
@@ -89,11 +101,13 @@ import {
   type ChatPortEvent,
   type ChatPortMsg,
   type ChatStatePayload,
+  type TranscribeStage,
   type VideoContextInfo,
 } from '../lib/messages';
 
 function errorMessage(e: unknown): string {
   if (e instanceof LLMError) return e.userMessage;
+  if (e instanceof SttError) return e.userMessage;
   if (e instanceof NotionError) return e.userMessage;
   if (
     e &&
@@ -699,6 +713,20 @@ export default defineBackground(() => {
             sendResponse({ ok: true, data: { latencyMs } });
             return;
           }
+          case 'sttTest': {
+            // 设置页连通性测试：上传 1s 静音 WAV，能拿到 2xx 即视为端点/密钥可用
+            const started = Date.now();
+            await transcribeAudio({
+              baseURL: msg.baseURL,
+              apiKey: msg.apiKey,
+              model: msg.model,
+              bytes: buildSilentWav(1),
+              filename: 'silence.wav',
+              mimeType: 'audio/wav',
+            });
+            sendResponse({ ok: true, data: { latencyMs: Date.now() - started } });
+            return;
+          }
           case 'reportVideoContext': {
             sendResponse({ ok: true, data: null });
             return;
@@ -737,6 +765,14 @@ export default defineBackground(() => {
             const knowledgeBases = await listImaKnowledgeBases({
               clientId: msg.clientId,
               apiKey: msg.apiKey,
+            });
+            sendResponse({ ok: true, data: knowledgeBases });
+            return;
+          }
+          case 'yuqueListKnowledgeBases': {
+            const knowledgeBases = await listYuqueKnowledgeBases({
+              token: msg.token,
+              host: msg.host,
             });
             sendResponse({ ok: true, data: knowledgeBases });
             return;
@@ -918,28 +954,100 @@ export default defineBackground(() => {
           if (!raw.force) {
             const cached = await getCachedSummary(raw.bvid, cid, modelId);
             if (cached) {
-              emitScoped({ type: 'done-cached', result: cached.result, ...scope });
+              const sub = await getCachedSubtitle(raw.bvid, cid);
+              emitScoped({
+                type: 'done-cached',
+                result: cached.result,
+                subtitleSource: sub?.source,
+                ...scope,
+              });
               return;
             }
           }
 
           // 字幕（缓存优先，24h）
-          let cues = (await getCachedSubtitle(raw.bvid, cid))?.cues;
+          const cachedSub = await getCachedSubtitle(raw.bvid, cid);
+          let cues = cachedSub?.cues;
+          let subtitleSource: SubtitleSource | undefined = cachedSub?.source;
           if (!cues) {
             const sub = await getSubtitleCues(raw.bvid, cid, { aid: info.aid });
             if (!sub || sub.cues.length === 0) {
-              emitScoped({ type: 'no-subtitle', ...scope });
-              return;
+              if (!raw.transcribe) {
+                emitScoped({ type: 'no-subtitle', ...scope });
+                return;
+              }
+              // ---- 语音转写（Beta）：拉音轨 → 上传转写 → 存为字幕缓存，随后走正常分析 ----
+              const stt = await getSttConfig();
+              if (!stt || !isSttConfig(stt.baseURL, stt.apiKey, stt.model)) {
+                emitScoped({
+                  type: 'error',
+                  message:
+                    '请先在设置页配置语音转写服务（支持 Groq 等 OpenAI 兼容端点）',
+                  ...scope,
+                });
+                return;
+              }
+              const emitStage = (stage: TranscribeStage, percent?: number) =>
+                emitScoped({
+                  type: 'transcribe-stage',
+                  stage,
+                  ...(percent !== undefined ? { percent } : {}),
+                  ...scope,
+                });
+              emitStage('download', 0);
+              const track = await getAudioTrack(raw.bvid, cid, { duration });
+              // 估算体积超限：下载前就拒绝，避免白拉几十 MB（Phase 1 仅单文件 ≤25MB）
+              if (track.sizeMB * 1024 * 1024 > MAX_STT_FILE_BYTES) {
+                throw new SttError('file_too_large', `约 ${track.sizeMB.toFixed(1)}MB（估算）`);
+              }
+              const audio = await downloadAudio(track.url, {
+                signal,
+                onProgress: (percent) => emitStage('download', percent),
+              });
+              emitStage('stt');
+              const { cues: sttCues, text } = await transcribeAudio({
+                baseURL: stt.baseURL,
+                apiKey: stt.apiKey,
+                model: stt.model,
+                bytes: audio.bytes,
+                filename: track.mimeType === 'video/mp4' ? 'audio.mp4' : 'audio.m4a',
+                mimeType: track.mimeType,
+                signal,
+              });
+              const finalCues =
+                sttCues.length > 0
+                  ? sttCues
+                  : text
+                    ? // 端点只回整段文本（无 segments）：降级为覆盖全片的单条 cue
+                      [{ start: 0, end: duration, text }]
+                    : [];
+              if (finalCues.length === 0) {
+                throw new SttError('bad_response', '转写结果为空（音频可能无声或格式不受支持）');
+              }
+              emitStage('saving');
+              // 写缓存后再分析：下次运行直接命中字幕缓存，不再消耗转写额度
+              await saveSubtitle({
+                bvid: raw.bvid,
+                cid,
+                lang: 'stt',
+                source: 'stt',
+                cues: finalCues,
+                fetchedAt: Date.now(),
+              });
+              cues = finalCues;
+              subtitleSource = 'stt';
+            } else {
+              await saveSubtitle({
+                bvid: raw.bvid,
+                cid,
+                lang: sub.track.lan,
+                source: sub.track.isAi ? 'ai' : 'human',
+                cues: sub.cues,
+                fetchedAt: Date.now(),
+              });
+              cues = sub.cues;
+              subtitleSource = sub.track.isAi ? 'ai' : 'human';
             }
-            await saveSubtitle({
-              bvid: raw.bvid,
-              cid,
-              lang: sub.track.lan,
-              source: sub.track.isAi ? 'ai' : 'human',
-              cues: sub.cues,
-              fetchedAt: Date.now(),
-            });
-            cues = sub.cues;
           }
 
           const prefs = await getPrefs();
@@ -985,7 +1093,7 @@ export default defineBackground(() => {
             });
             return;
           }
-          emitScoped({ type: 'done', result, ...scope });
+          emitScoped({ type: 'done', result, subtitleSource, ...scope });
         } catch (e) {
           emitScoped({ type: 'error', message: errorMessage(e), ...scope });
         }

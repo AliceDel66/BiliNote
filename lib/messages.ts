@@ -1,5 +1,6 @@
 /** UI ↔ Background 消息协议 */
 import type { AnalysisResult, ProgressEvent } from './summarize/types';
+import type { SubtitleSource } from './storage/db';
 import type {
   ChatSession,
   ChatSnapshot,
@@ -39,6 +40,7 @@ export type BgRequest =
   | { type: 'getPlaybackTime' }
   | { type: 'fetchModels'; baseURL: string; apiKey: string }
   | { type: 'testConnection'; baseURL: string; apiKey: string; model: string }
+  | { type: 'sttTest'; baseURL: string; apiKey: string; model: string }
   | {
       type: 'reportVideoContext';
       context: { bvid: string; p: number; title: string; url: string };
@@ -49,6 +51,7 @@ export type BgRequest =
   | { type: 'notionSyncStatus'; noteId: number }
   | { type: 'connectorTest'; profile: ConnectorProfile }
   | { type: 'imaListKnowledgeBases'; clientId: string; apiKey: string }
+  | { type: 'yuqueListKnowledgeBases'; token: string; host: string }
   | { type: 'connectorList' }
   | { type: 'connectorSyncStatus'; noteId: number }
   | { type: 'noteSaved'; noteId: number }
@@ -65,7 +68,14 @@ export type BgResponse<T> = { ok: true; data: T } | { ok: false; error: string }
 
 /** Side Panel → Background 分析端口消息 */
 export type AnalyzePortMsg =
-  | { type: 'analyze'; bvid: string; p: number; force?: boolean }
+  | {
+      type: 'analyze';
+      bvid: string;
+      p: number;
+      force?: boolean;
+      /** 无字幕时走语音转写（STT）路径而非报 no-subtitle */
+      transcribe?: boolean;
+    }
   | { type: 'cancel' };
 
 /**
@@ -79,13 +89,26 @@ export interface AnalyzeEventScope {
   p: number;
 }
 
+/** 语音转写阶段（无字幕视频的 STT 路径） */
+export type TranscribeStage = 'download' | 'stt' | 'saving';
+
 /** Background → Side Panel 分析端口事件（全部携带视频身份，进度事件也不例外） */
 export type AnalyzePortEvent =
   | (Exclude<ProgressEvent, { type: 'done' } | { type: 'error' }> & AnalyzeEventScope)
-  | ({ type: 'done'; result: AnalysisResult } & AnalyzeEventScope)
+  | ({
+      type: 'transcribe-stage';
+      stage: TranscribeStage;
+      /** 仅 download 阶段携带（0–100）；其余阶段为不定进度 */
+      percent?: number;
+    } & AnalyzeEventScope)
+  | ({ type: 'done'; result: AnalysisResult; subtitleSource?: SubtitleSource } & AnalyzeEventScope)
   | ({ type: 'error'; message: string } & AnalyzeEventScope)
   | ({ type: 'no-subtitle' } & AnalyzeEventScope)
-  | ({ type: 'done-cached'; result: AnalysisResult } & AnalyzeEventScope);
+  | ({
+      type: 'done-cached';
+      result: AnalysisResult;
+      subtitleSource?: SubtitleSource;
+    } & AnalyzeEventScope);
 
 export const ANALYZE_PORT = 'bilinote-analyze';
 

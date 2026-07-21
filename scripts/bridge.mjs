@@ -25,7 +25,7 @@
  *
  * 安全：path 一律相对 --root，拒绝绝对路径与 `..` 逃逸；请求体上限 1 MB。
  * 一个 bridge 同时覆盖 Obsidian / Logseq / 纯 Markdown vault。
- * 语雀等 stdio MCP 服务经 mcp-proxy 子命令接入（详见 --help 的语雀示例）。
+ * 既存 local-mcp profile 可继续经 mcp-proxy 子命令接入；新建语雀连接已改用官方 OpenAPI。
  */
 import http from 'node:http';
 import { spawn } from 'node:child_process';
@@ -48,13 +48,15 @@ const HELP = `用法：
     node scripts/bridge.mjs mcp-proxy --command "<cmd...>" [--env K=V ...]
                             [--port ${DEFAULT_PROXY_PORT}] [--token <token>] [--rpc-timeout ${DEFAULT_RPC_TIMEOUT_MS}]
 
-  语雀（yuque-mcp）完整示例：
+  Legacy local-mcp（yuque-mcp）迁移前兼容示例：
     ① pip install -e .        # 或 uv pip install -e .，安装 EnglandLobster/yuque-mcp
     ② 从 https://www.yuque.com/settings/tokens 获取 API Token
     ③ node scripts/bridge.mjs mcp-proxy \\
          --command "python -m yuque_mcp.server" \\
          --env YUQUE_API_TOKEN=<你的语雀Token> --port ${DEFAULT_PROXY_PORT}
-    ④ 在扩展设置页「语雀」连接中填入端口与 bridge token，点「连接测试」
+    ④ 在扩展设置页编辑既存 Legacy Local MCP profile，填入端口与 bridge token
+
+  新建语雀连接无需 mcp-proxy，请直接在扩展设置页使用「语雀 · 官方 OpenAPI」。
 
   --token 省略时自动生成并在启动时打印（仅本次启动有效）。
 `;

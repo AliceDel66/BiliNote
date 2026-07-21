@@ -15,6 +15,13 @@ const control = vi.hoisted(() => ({
   chatRounds: [] as { deltas: string[]; outcome: Record<string, unknown> }[],
   chatCalls: [] as Record<string, unknown>[],
   summarizeImpl: null as null | ((params: Record<string, unknown>) => Promise<unknown>),
+  summarizeCalls: [] as Record<string, unknown>[],
+  audioTrack: null as null | Record<string, unknown>,
+  audioDownload: null as null | { bytes: ArrayBuffer; sizeMB: number },
+  getAudioTrackCalls: 0,
+  downloadAudioCalls: 0,
+  transcribeImpl: null as null | ((params: Record<string, unknown>) => Promise<Record<string, unknown>>),
+  transcribeCalls: [] as Record<string, unknown>[],
   saveSummaryImpl: null as null | ((row: Record<string, unknown>) => Promise<void>),
   saveNoteCASImpl: null as
     | null
@@ -88,6 +95,25 @@ vi.mock('../lib/bilibili', async (importOriginal) => {
     getVideoInfo: async () => control.videoInfo,
     getSubtitleCues: async () => control.subtitle,
     getDanmakuSample: async () => control.danmaku,
+    getAudioTrack: async () => {
+      control.getAudioTrackCalls++;
+      return control.audioTrack;
+    },
+    downloadAudio: async () => {
+      control.downloadAudioCalls++;
+      return control.audioDownload;
+    },
+  };
+});
+
+vi.mock('../lib/transcribe', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../lib/transcribe')>();
+  return {
+    ...orig,
+    transcribeAudio: (params: Record<string, unknown>) => {
+      control.transcribeCalls.push(params);
+      return control.transcribeImpl!(params);
+    },
   };
 });
 
@@ -110,7 +136,10 @@ vi.mock('../lib/llm', async (importOriginal) => {
 });
 
 vi.mock('../lib/summarize', () => ({
-  summarize: (params: Record<string, unknown>) => control.summarizeImpl!(params),
+  summarize: (params: Record<string, unknown>) => {
+    control.summarizeCalls.push(params);
+    return control.summarizeImpl!(params);
+  },
 }));
 
 vi.mock('../lib/connectors', () => ({
@@ -157,6 +186,7 @@ import {
   getCachedSummary,
   getNote,
   getNotionMapping,
+  saveSttConfig,
   setPrefs,
 } from '../lib/storage';
 import { getSessionByVideo, getTopic, listTurnsByTopic } from '../lib/chat';
@@ -305,6 +335,13 @@ beforeEach(async () => {
   control.chatRounds = [];
   control.chatCalls = [];
   control.syncCalls = [];
+  control.summarizeCalls = [];
+  control.transcribeCalls = [];
+  control.getAudioTrackCalls = 0;
+  control.downloadAudioCalls = 0;
+  control.audioTrack = null;
+  control.audioDownload = null;
+  control.transcribeImpl = null;
   control.saveSummaryImpl = null;
   control.saveNoteCASImpl = null;
   control.activeConnectorProfile = null;
@@ -397,6 +434,131 @@ describe('ANALYZE_PORT 身份绑定与先存后报', () => {
     const err = port.events.find((e) => e.type === 'error');
     expect(err).toMatchObject({ bvid: 'BV1ana', cid: 11, p: 1 });
     expect(String(err?.message)).toContain('缓存写入失败');
+  });
+});
+
+// ---------- 分析端口：语音转写（STT）路径 ----------
+
+describe('ANALYZE_PORT 语音转写（无字幕 + transcribe:true）', () => {
+  const STT_CUES = [
+    { start: 0, end: 2, text: '转写第一句' },
+    { start: 2, end: 5, text: '第二句' },
+  ];
+
+  beforeEach(async () => {
+    control.videoInfo = videoInfoFor('BV1stt', [
+      { cid: 77, page: 1, part: '', duration: 300 },
+    ]);
+    control.subtitle = null; // 无字幕视频
+    control.audioTrack = {
+      url: 'https://upos-sz-mirror.bilivideo.com/a.m4s',
+      bandwidth: 128000,
+      sizeMB: 4.5,
+      mimeType: 'audio/mp4',
+    };
+    control.audioDownload = { bytes: new Uint8Array([1, 2, 3]).buffer, sizeMB: 0.01 };
+    control.transcribeImpl = async () => ({ cues: STT_CUES, text: '转写第一句第二句' });
+    await seedProfile();
+    startBg();
+  });
+
+  it('转写链路：stage 顺序 download→stt→saving（带 C1 身份）→ saveSubtitle(source=stt) → summarize 用转写 cues → done 带 subtitleSource', async () => {
+    await saveSttConfig({
+      baseURL: 'https://api.groq.com/openai/v1',
+      apiKey: 'gsk',
+      model: 'whisper-large-v3',
+    });
+    const port = connectPort(ANALYZE_PORT);
+    port.send({ type: 'analyze', bvid: 'BV1stt', p: 1, force: true, transcribe: true });
+    await waitForEvent(port, 'done');
+
+    // 阶段事件顺序与身份（C1 契约对 transcribe-stage 同样生效）
+    const stages = port.events.filter((e) => e.type === 'transcribe-stage');
+    expect(stages.map((e) => e.stage)).toEqual(['download', 'stt', 'saving']);
+    for (const s of stages) expect(s).toMatchObject({ bvid: 'BV1stt', cid: 77, p: 1 });
+    expect(stages[0]).toMatchObject({ percent: 0 });
+
+    // 转写结果存为字幕缓存（source='stt'），后续运行直接命中缓存
+    const rows = await db.subtitles.toArray();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ bvid: 'BV1stt', cid: 77, source: 'stt' });
+    expect(rows[0].cues).toEqual(STT_CUES);
+
+    // 正常分析路径继续，且用的是转写 cues
+    expect(control.summarizeCalls).toHaveLength(1);
+    expect(control.summarizeCalls[0].cues).toEqual(STT_CUES);
+
+    // 转写参数来自设置页配置
+    expect(control.transcribeCalls).toHaveLength(1);
+    expect(control.transcribeCalls[0]).toMatchObject({
+      baseURL: 'https://api.groq.com/openai/v1',
+      model: 'whisper-large-v3',
+      mimeType: 'audio/mp4',
+    });
+
+    const done = port.events.find((e) => e.type === 'done');
+    expect(done).toMatchObject({ bvid: 'BV1stt', cid: 77, p: 1, subtitleSource: 'stt' });
+  });
+
+  it('未配置 STT → 可操作错误（请先配置语音转写服务），不拉音轨不分析', async () => {
+    const port = connectPort(ANALYZE_PORT);
+    port.send({ type: 'analyze', bvid: 'BV1stt', p: 1, force: true, transcribe: true });
+    await waitForEvent(port, 'error');
+
+    const err = port.events.find((e) => e.type === 'error');
+    expect(err).toMatchObject({ bvid: 'BV1stt', cid: 77, p: 1 });
+    expect(String(err?.message)).toContain('请先在设置页配置语音转写服务');
+    expect(port.events.some((e) => e.type === 'transcribe-stage')).toBe(false);
+    expect(port.events.some((e) => e.type === 'done')).toBe(false);
+    expect(control.getAudioTrackCalls).toBe(0);
+    expect(control.summarizeCalls).toHaveLength(0);
+  });
+
+  it('估算体积超 25MB → 下载前拒绝（中文错误），不下载不上传', async () => {
+    await saveSttConfig({
+      baseURL: 'https://api.groq.com/openai/v1',
+      apiKey: 'gsk',
+      model: 'whisper-large-v3',
+    });
+    control.audioTrack = { url: 'https://cdn/big.m4s', bandwidth: 320000, sizeMB: 30, mimeType: 'audio/mp4' };
+    const port = connectPort(ANALYZE_PORT);
+    port.send({ type: 'analyze', bvid: 'BV1stt', p: 1, force: true, transcribe: true });
+    await waitForEvent(port, 'error');
+
+    const err = port.events.find((e) => e.type === 'error');
+    expect(String(err?.message)).toContain('25MB');
+    expect(control.downloadAudioCalls).toBe(0);
+    expect(control.transcribeCalls).toHaveLength(0);
+    expect(port.events.some((e) => e.type === 'done')).toBe(false);
+  });
+
+  it('端点只回整段文本（无 segments）→ 降级为覆盖全片的单条 cue 后继续分析', async () => {
+    await saveSttConfig({
+      baseURL: 'https://api.groq.com/openai/v1',
+      apiKey: 'gsk',
+      model: 'whisper-large-v3',
+    });
+    control.transcribeImpl = async () => ({ cues: [], text: '整段文本' });
+    const port = connectPort(ANALYZE_PORT);
+    port.send({ type: 'analyze', bvid: 'BV1stt', p: 1, force: true, transcribe: true });
+    await waitForEvent(port, 'done');
+
+    const rows = await db.subtitles.toArray();
+    expect(rows[0].cues).toEqual([{ start: 0, end: 300, text: '整段文本' }]);
+    expect(control.summarizeCalls).toHaveLength(1);
+  });
+
+  it('transcribe 缺省：无字幕仍走 no-subtitle（旧行为不变）', async () => {
+    await saveSttConfig({
+      baseURL: 'https://api.groq.com/openai/v1',
+      apiKey: 'gsk',
+      model: 'whisper-large-v3',
+    });
+    const port = connectPort(ANALYZE_PORT);
+    port.send({ type: 'analyze', bvid: 'BV1stt', p: 1, force: true });
+    await waitForEvent(port, 'no-subtitle');
+    expect(port.events.some((e) => e.type === 'transcribe-stage')).toBe(false);
+    expect(control.getAudioTrackCalls).toBe(0);
   });
 });
 

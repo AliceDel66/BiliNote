@@ -10,6 +10,7 @@
 export type ConnectorKind =
   | 'notion'
   | 'ima'
+  | 'yuque'
   | 'remote-mcp'
   | 'custom-mcp'
   | 'local-bridge'
@@ -41,6 +42,7 @@ export const DEFAULT_LOCAL_MCP_PORT = 27184;
  *
  * config 约定（按 kind）：
  * - ima：{ clientId, apiKey, knowledgeBaseId, knowledgeBaseName }
+ * - yuque：{ token, host, repoId, repoName }
  * - remote-mcp / custom-mcp：{ endpoint, token?, authScheme? }
  * - local-mcp：{ port, token }（端点固定为 http://127.0.0.1:<port>/mcp，token 即 bridge token）
  * - local-bridge：{ port, token }
@@ -102,6 +104,12 @@ export const CONNECTOR_KIND_INFO: Record<
     defaultName: 'ima 知识库（Beta）',
     desc: '官方 OpenAPI：Markdown 笔记新建与增量追加，写入指定 ima 知识库',
   },
+  yuque: {
+    label: '语雀',
+    status: 'beta',
+    defaultName: '语雀知识库（Beta）',
+    desc: '官方 OpenAPI：直连语雀知识库，Markdown 文档新建与整篇更新',
+  },
   'remote-mcp': {
     label: 'Remote MCP',
     status: 'beta',
@@ -121,10 +129,10 @@ export const CONNECTOR_KIND_INFO: Record<
     desc: '经本机 bridge 写入 Obsidian Vault，Markdown 文件保留在本地',
   },
   'local-mcp': {
-    label: 'Local MCP',
+    label: 'Local MCP（Legacy）',
     status: 'beta',
-    defaultName: '语雀（本地 MCP）',
-    desc: '经本机 bridge mcp-proxy 接入 stdio MCP 服务（语雀等）',
+    defaultName: '本地 MCP（Legacy）',
+    desc: '旧版 profile：经本机 bridge mcp-proxy 接入 stdio MCP 服务',
   },
 };
 
@@ -137,7 +145,8 @@ export interface ConnectorPreset {
     | 'feishu-docs'
     | 'custom-mcp'
     | 'obsidian'
-    | 'yuque';
+    | 'yuque'
+    | 'legacy-local-mcp';
   kind: ConnectorKind;
   label: string;
   status: ConnectorStatus;
@@ -197,11 +206,11 @@ export const CONNECTOR_PRESETS: ConnectorPreset[] = [
   },
   {
     id: 'yuque',
-    kind: 'local-mcp',
+    kind: 'yuque',
     label: '语雀',
     status: 'beta',
-    defaultName: '语雀（本地 MCP）',
-    desc: '经本机 bridge mcp-proxy 运行 yuque-mcp（Python stdio → HTTP）',
+    defaultName: '语雀知识库（Beta）',
+    desc: '官方 OpenAPI：无需本机 Bridge，选择知识库后直接同步 Markdown 文档',
   },
 ];
 

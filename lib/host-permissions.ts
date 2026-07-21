@@ -3,10 +3,12 @@
  * - *.bilibili.com：视频信息 / wbi 签名 / 字幕轨列表等 B站接口
  * - *.hdslb.com：字幕文件 CDN（字幕 JSON 实际托管在 aisubtitle.hdslb.com 等域，
  *   缺失该权限时 fetch 会以 TypeError: Failed to fetch 失败）
+ * - *.bilivideo.com：音视频 CDN（语音转写拉取音轨；playurl 返回的流地址托管在该域）
  */
 export const REQUIRED_HOST_PERMISSIONS = [
   '*://*.bilibili.com/*',
   '*://*.hdslb.com/*',
+  '*://*.bilivideo.com/*',
 ];
 
 /** 从 baseURL 推导 MV3 host 权限 pattern（如 https://api.example.com/*）；URL 非法时返回 null */

@@ -41,6 +41,13 @@ export interface SyncTargetDeps {
 }
 
 function errorText(e: unknown): string {
+  if (
+    e &&
+    typeof e === 'object' &&
+    typeof (e as { userMessage?: unknown }).userMessage === 'string'
+  ) {
+    return (e as { userMessage: string }).userMessage;
+  }
   return (e as Error).message ?? String(e);
 }
 
@@ -54,7 +61,9 @@ export async function syncNoteToTarget(
 ): Promise<TargetSyncRow> {
   const profile = await getActiveConnectorProfile();
   if (!profile) {
-    throw new Error('请先在设置页配置知识库连接（Notion / ima / 腾讯文档 / MCP / Obsidian）');
+    throw new Error(
+      '请先在设置页配置知识库连接（Notion / ima / 语雀 / 腾讯文档 / MCP / Obsidian）',
+    );
   }
 
   // ---- Notion：既有路径原样委托 ----

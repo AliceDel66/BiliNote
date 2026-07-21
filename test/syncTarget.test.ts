@@ -161,6 +161,34 @@ describe('syncNoteToTarget 路由', () => {
     const persisted = await getConnectorSync(NOTE_ID, bridge.id);
     expect(persisted?.syncStatus).toBe('error');
   });
+
+  it('语雀鉴权失败 → 落安全友好错误，不泄露 Token', async () => {
+    await seedNote();
+    const yuque = await saveConnectorProfile({
+      kind: 'yuque',
+      name: '语雀知识库',
+      status: 'beta',
+      config: {
+        token: 'yuque-secret-token',
+        host: 'https://www.yuque.com',
+        repoId: '42',
+        repoName: '课程库',
+      },
+    });
+    await setActiveConnectorProfileId(yuque.id);
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ message: 'yuque-secret-token invalid' }), {
+        status: 401,
+      })) as typeof fetch;
+
+    const row = await syncNoteToTarget(NOTE_ID, {
+      deps: { connectorDeps: { fetchImpl } },
+    });
+
+    expect(row.syncStatus).toBe('error');
+    expect(row.error).toBe('语雀 OpenAPI 鉴权失败，请检查 API Token、空间 Host 与知识库权限');
+    expect(JSON.stringify(row)).not.toContain('yuque-secret-token');
+  });
 });
 
 describe('getTargetSyncRow 统一状态查询', () => {

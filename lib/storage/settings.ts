@@ -120,3 +120,26 @@ export async function patchNotionConfig(
 export async function clearNotionConfig(): Promise<void> {
   await browser.storage.local.remove(NOTION_KEY);
 }
+
+// ---------- 语音转写（STT，OpenAI 兼容 /audio/transcriptions；仅存 chrome.storage.local，不进入数据导出） ----------
+
+export interface SttConfig {
+  baseURL: string;
+  apiKey: string;
+  model: string;
+}
+
+const STT_KEY = 'sttConfig';
+
+export async function getSttConfig(): Promise<SttConfig | null> {
+  const res = await browser.storage.local.get(STT_KEY);
+  return (res[STT_KEY] as SttConfig | undefined) ?? null;
+}
+
+export async function saveSttConfig(config: SttConfig): Promise<void> {
+  await browser.storage.local.set({ [STT_KEY]: config });
+}
+
+export async function clearSttConfig(): Promise<void> {
+  await browser.storage.local.remove(STT_KEY);
+}

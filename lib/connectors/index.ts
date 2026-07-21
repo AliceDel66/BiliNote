@@ -5,5 +5,6 @@ export * from './mcpConnector';
 export * from './bridgeConnector';
 export * from './notionConnector';
 export * from './imaConnector';
+export * from './yuqueConnector';
 export * from './registry';
 export * from './syncTarget';
