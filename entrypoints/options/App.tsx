@@ -15,7 +15,6 @@ import {
   DatabaseIcon,
   DownloadIcon,
   EyeIcon,
-  NotebookPenIcon,
   PlusIcon,
   SparklesIcon,
   Trash2Icon,
@@ -390,9 +389,7 @@ export default function App() {
       <main className="mx-auto max-w-2xl p-6 space-y-8">
         <header className="space-y-2">
           <div className="flex items-center gap-2">
-            <span className="flex h-5 w-5 items-center justify-center rounded-[6px] gradient-brand">
-              <NotebookPenIcon size={12} className="text-white" />
-            </span>
+            <img src="/icon/128.png" alt="BiliNote" className="h-5 w-5 rounded-[6px]" />
             <span className="text-[15px] font-semibold tracking-tight">BiliNote</span>
           </div>
           <h1 className="text-[17px] font-semibold tracking-tight">设置</h1>

@@ -510,9 +510,7 @@ export default function App() {
       <div className="sticky top-0 z-10 bg-page/75 dark:bg-page-dark/75 backdrop-blur-[12px]">
         <header className="flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-2">
-            <span className="flex h-5 w-5 items-center justify-center rounded-[6px] gradient-brand">
-              <NotebookPenIcon size={12} className="text-white" />
-            </span>
+            <img src="/icon/128.png" alt="BiliNote" className="h-5 w-5 rounded-[6px]" />
             <h1 className="text-[15px] font-semibold tracking-tight">BiliNote</h1>
           </div>
           <button

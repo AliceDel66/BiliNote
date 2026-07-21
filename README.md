@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="public/logo-tile.png" alt="BiliNote logo" width="96" />
+
 # BiliNote
 
 ### 把 B 站视频变成可检索、可回看、可复习的知识笔记

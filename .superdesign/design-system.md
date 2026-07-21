@@ -76,7 +76,7 @@ success `#10B981` / warning `#F59E0B` / danger `#EF4444` / info `#38BDF8`；soft
 
 ## Component specs
 
-- **Logo**：6px 圆角渐变 tile（brand-gradient）20px，内嵌白色 Lucide `notebook-pen` 12px + 「BiliNote」15px 600 tracking-tight
+- **Logo**：使用品牌资产 `public/logo-tile.png`（紫色圆角方块 + 白色学士帽笔记图标，透明角）；扩展图标 `public/icon/{16,32,48,128}.png`；界面内 20px 圆角 6px 展示（side panel / options 顶栏）+ 「BiliNote」15px 600 tracking-tight。**禁止**回退为渐变 tile + Lucide 图标的旧方案
 - **Primary CTA**：brand-gradient 底、白字、8px 圆角、40px 高、`shadow: 0 4px 14px -4px rgba(99,102,241,.5)`、左 sparkles 14px 图标；hover 亮度 +4%；active scale(.98)
 - **Ghost button**：1px border-strong、透明底、36px、hover 边框/文字转 brand-500
 - **视频 hero 卡**：surface + 14px 圆角；左侧 96×60 缩略图（渐变底 + 白色 play 图标占位，实拍封面 object-cover）；标题 15px/500 两行截断；meta 12px secondary（UP 主 · 分P · 时长，间隔点 `·` 用 text-faint）
