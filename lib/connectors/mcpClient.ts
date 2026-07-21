@@ -152,7 +152,7 @@ export function createMcpClient(opts: McpClientOptions): McpClient {
       const result = (await rpc('initialize', {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: 'BiliNote', version: '0.1.0' },
+        clientInfo: { name: 'BiliNote', version: '0.1.1' },
       })) as {
         protocolVersion?: string;
         serverInfo?: { name?: string; version?: string };

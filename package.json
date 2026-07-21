@@ -1,6 +1,6 @@
 {
   "name": "bilinote",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "BiliNote — AI 视频学习助手，把 B站变成你的专属 AI 课堂",
   "private": true,
   "type": "module",

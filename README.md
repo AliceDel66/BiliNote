@@ -4,307 +4,468 @@
 
 # BiliNote
 
-### 把 B 站视频变成可检索、可回看、可复习的知识笔记
+**把 Bilibili 视频变成带时间锚点的课程、对话与知识笔记**
 
-面向视频学习场景的开源 AI 浏览器扩展。提取视频上下文，调用你选择的模型，沉淀属于自己的知识库。
+一个 Local-first、BYOK 的开源浏览器扩展。优先读取视频已有字幕；无字幕时可由用户选择语音转写，再用自己的模型完成课程分析与随看随问，把 Markdown 笔记保存在本地或同步到自己的知识库。
 
-[![Status](https://img.shields.io/badge/status-pre--alpha-8b5cf6?style=flat-square)](#项目状态)
 [![License](https://img.shields.io/badge/license-MIT-f59e0b?style=flat-square)](LICENSE)
-[![WXT](https://img.shields.io/badge/built%20with-WXT-ff7a1a?style=flat-square)](#技术栈)
-[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square)](#技术栈)
+[![WXT](https://img.shields.io/badge/framework-WXT-ff7a1a?style=flat-square)](https://wxt.dev/)
+[![TypeScript](https://img.shields.io/badge/language-TypeScript-3178c6?style=flat-square)](https://www.typescriptlang.org/)
+[![Manifest](https://img.shields.io/badge/manifest-MV3-4285f4?style=flat-square)](https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3)
+[![Release](https://img.shields.io/github/v/release/AliceDel66/BiliNote?include_prereleases&style=flat-square&label=release&color=8b5cf6)](https://github.com/AliceDel66/BiliNote/releases)
 [![GitHub Stars](https://img.shields.io/github/stars/AliceDel66/BiliNote?style=flat-square&color=10b981)](https://github.com/AliceDel66/BiliNote/stargazers)
 
-[功能进度](#功能进度) · [参与开发](#参与开发) · [架构设计](#架构设计) · [隐私与权限](#隐私与权限) · [路线图](#路线图) · [English](#english-summary)
+**简体中文** · [English](README.en.md)
 
-[提交问题](https://github.com/AliceDel66/BiliNote/issues/new) · [查看 Issues](https://github.com/AliceDel66/BiliNote/issues) · [参与贡献](#贡献指南)
+[项目赞助商：Token小铺](https://api.zgonline.top/) · [免费语音转写 API：Groq](https://groq.com/)
+
+[工作原理](#工作原理) · [系统架构](#系统架构) · [核心流程](#核心流程) · [赞助支持](#赞助支持) · [数据与隐私](#数据与隐私) · [快速开始](#快速开始) · [参与贡献](#参与贡献)
 
 </div>
 
 > [!IMPORTANT]
-> BiliNote 仍处于 **pre-alpha** 阶段，但主链路已全部落地并可日常使用：**视频识别 → 字幕分析 → 时间戳跳转 → 本地笔记 → Notion 同步**，以及 **三 Tab 侧边栏（课程 / 对话 / 笔记）+ AI 随看随问 + 模型自带联网搜索 + 数据边界控制**。当前重点是真实浏览器全链路回归与发布准备。仓库适合开发者试用，尚无面向普通用户的稳定安装包。
+> BiliNote 默认读取 Bilibili 已提供的字幕，不会自动下载或上传媒体。只有无字幕且用户点击“使用语音转写（Beta）”时，扩展才会临时拉取当前分 P 的最低码率 DASH 音轨；无 DASH 时可能回退到 MP4 混流，并把该文件发送到用户配置的 OpenAI-compatible STT 服务。Phase 1 仅支持单文件不超过 25MB，暂不支持分段转写。
 
-## 为什么做 BiliNote
+> [!NOTE]
+> 本文档对应 `v0.1.1` 与当前 `main`。`v0.1.1` 首次打包无字幕视频的 Beta 语音转写，并新增语雀官方 OpenAPI 连接器；当前仍是 pre-alpha，建议开发者和早期用户试用。
 
-在 B 站学习，难点往往不在“看完”，而在“留下来”：
+## BiliNote 是什么
 
-- 长视频缺少可检索结构，重点难以再次定位；
-- 手动摘录频繁打断观看，笔记还会散落在不同工具；
-- 通用 AI 不知道当前视频和播放进度，需要反复补充上下文；
-- 封闭工具容易绑定模型、托管数据，也难以审计真实行为。
+BiliNote 把视频学习拆成四个连续界面，并让同一份本地课程数据贯穿其中：
 
-BiliNote 希望建立一条透明、可控的学习链路：
+| 界面 | 作用 |
+| --- | --- |
+| **课程** | 识别当前视频与分 P，读取已有字幕或按需语音转写，生成课程大纲、分段总结、重点、拓展知识与注意事项 |
+| **对话** | 冻结当前播放位置，用附近字幕、课程结构和笔记摘录回答问题；完整回答可写入课程笔记 |
+| **笔记** | 编辑和预览 Markdown，保留时间戳，并把本地笔记同步到所选知识库；底层会保留最近版本 |
+| **我的** | 直接从本地分析、笔记和问答记录计算学习统计、连续天数、活动热力图与课程进度 |
 
-> **视频上下文 → AI 理解 → 结构化笔记 → 知识库同步 → 持续复习**
+项目没有托管业务后端。视频上下文、笔记、分析缓存和问答记录保存在浏览器；模型调用、语音转写和知识库同步从扩展直接发往用户配置的服务。
 
-## 它如何工作
+## 赞助支持
+
+- **项目赞助商**：[Token小铺 AI API Gateway](https://api.zgonline.top/)
+- **免费语音转写 API**：[Groq](https://groq.com/) 的 GroqCloud 提供可免费开始的 Free tier，并兼容 BiliNote 当前使用的 `/audio/transcriptions` 协议；额度、限速、价格和模型可用性以 Groq 当前政策为准。
+
+BiliNote 不内置共享 API Key，也不会默认把请求发往赞助商或 Groq。模型与语音转写服务都由用户主动配置、授权和承担相应服务条款。
+
+## 工作原理
 
 ```mermaid
 flowchart LR
-    Video["B 站视频"] --> Capture["字幕与章节"]
-    Danmaku["可选弹幕高光"] -.-> Capture
-    Capture --> Analyze["AI 大纲与解析"]
-    Analyze --> Note["结构化笔记"]
-    Note --> Local[("本地知识库")]
-    Local --> Sync["Notion 同步"]
-    Video --> Chat["AI 答疑（随看随问）"]
-    Chat -->|"问答自动记录"| Note
-    Sync -.->|"V3"| Review["测验与复习"]
+    Video["Bilibili 视频页"] --> Context["视频 / 分 P / 播放位置"]
+    Context --> Subtitle{"有可用字幕？"}
+    Subtitle -->|"有"| Analyze["Map-Reduce 课程分析"]
+    Subtitle -->|"无，用户选择"| Audio["临时拉取最低码率音轨"]
+    Audio --> STT["OpenAI-compatible STT"]
+    STT --> Analyze
+    Analyze --> Course["大纲 / 分段 / 重点 / 时间锚点"]
+    Course -->|"用户存为笔记"| Note["本地 Markdown 笔记"]
+    Context --> Chat["课程上下文问答"]
+    Course --> Chat
+    Chat -->|"完整回答，可撤销"| Note
+    Note --> Local[("IndexedDB")]
+    Note -->|"可选单向同步"| Connector["知识库连接器"]
+    Local --> Profile["本地学习统计"]
 ```
 
-| 核心能力 | 用户价值 |
-| :--- | :--- |
-| **理解视频** | 从字幕、分 P 与章节中提炼大纲、摘要、难点、拓展知识与注意事项 |
-| **定位原文** | 为知识点保留时间戳，点击即可回到对应画面 |
-| **随看随问** | 不离开视频页提问；AI 结合当前分 P、播放时间与课程内容回答，并自动沉淀进笔记 |
-| **自由选模型** | 通过 BYOK 与 OpenAI-compatible API 接入自己的模型服务，联网搜索直接用模型自带能力 |
-| **拥有知识** | 本地保存笔记与会话，并按课程与章节同步到个人知识库 |
+核心原则：
 
-## 项目状态
+- **Local-first**：本地笔记是 source of truth，外部知识库是可重建的派生产物；
+- **BYOK**：模型与 STT API Key、知识库令牌和写入目标由用户配置；
+- **Context-aware**：分析、问答、笔记都绑定 `bvid + cid`，时间锚点能跳回对应画面；
+- **Adapter-based**：Notion、ima、MCP 与本地 Markdown 都实现同一写入接口，不进入核心笔记模型；
+- **Auditable**：权限、存储、网络目的地和失败路径都能从源码追踪。
 
-### 当前实现
+## 系统架构
 
-| 模块 | 状态 | 当前范围 |
-| :--- | :---: | :--- |
-| WXT / Manifest V3 工程配置 | 已实现 | React、TypeScript strict、Tailwind CSS v4、pnpm |
-| Bilibili Adapter | 已实现 | 视频/分 P 信息、WBI 签名、字幕轨选择、字幕归一化、24 小时缓存、弹幕采样 |
-| OpenAI-compatible Client | 已实现 | 多 Profile、模型列表、连通性测试、SSE 流式对话、tools 透传、统一错误 |
-| Summarization Pipeline | 已实现 | 并发 Map-Reduce、流式进度、取消、结果缓存、时间戳校验、JSON 修复与降级、拓展知识 / 注意事项 |
-| Extension Runtime | 已实现 | Content Script 识别 SPA 路由；首开标签页自动补注入 + URL 兜底；Background 统一编排 Bilibili / LLM / Notion / Chat |
-| Side Panel | 已实现 | 三 Tab（课程 / 对话 / 笔记）、CourseContextBar 吸顶、视频卡、一键分析、时间戳 pill、设计系统 v2 明暗双主题 |
-| AI Chat 答疑 | 已实现 | 播放快照（≤1s）、±60s 字幕上下文预算、完整度三态降级、注入防护、思考过程剥离、会话/话题/轮次持久化 |
-| 问答自动记录 | 已实现 | 完整回答后幂等写入当前分 P 笔记（chatEntryId 边界标记）、撤销 / 不记录 / 重新记录、15s 合并同步 |
-| Web Search（模型自带） | 已实现 | Kimi `$web_search` 能力表、未知提供商按不支持处理、强制联网硬报错、自动拓展降级提示 |
-| 数据边界 | 已实现 | 最小暴露默认；设置页逐源开关（字幕窗口 / 笔记摘录 / 播放元信息），关闭字幕即课程内容不出本地 |
-| Local Notes | 已实现 | 元信息头（含原视频链接）、AI 结果转 Markdown、1 秒防抖自动保存、预览、删除、最近 10 版历史 |
-| Notion Sync | 已实现（实号已验证） | 内部集成令牌、根页面选择、课程 / `P{n} · 章节` 页面树与自动改名、自动/手动同步、冲突检测、限流重试 |
-| Options / Data | 已实现 | 模型 / Notion / 数据边界设置、弹幕与自动记录开关、数据导出（含问答会话，不含密钥令牌）、二次确认清空 |
-| Browser E2E / Release | 进行中 | 字幕 CDN 权限、视频识别、Notion 实号同步已回归；最新 UI 真机截图回归持续进行，暂无 release 包 |
+```mermaid
+flowchart LR
+    Page["Bilibili Video Page"] <--> Content["Content Script<br/>context · playback · seek"]
 
-> [!NOTE]
-> “已实现”表示主路径代码已落地并经单测/真机构建验证，不等于已发布。Notion 当前使用手动创建的 **Internal Integration Token**，不是 OAuth；同步更新采用“归档原有子块后重写整页”，不是逐块增量 diff。
+    subgraph Extension["BiliNote · Manifest V3"]
+        Panel["Side Panel<br/>Course · Chat · Notes · Profile"]
+        Options["Options<br/>models · connectors · privacy"]
+        Worker["Background Service Worker<br/>routing · orchestration · queues"]
+        Dexie[("IndexedDB / Dexie")]
+        ChromeStore[("chrome.storage")]
 
-### 当前验证基线
+        Panel <--> Worker
+        Options <--> Worker
+        Panel <--> Dexie
+        Options <--> Dexie
+        Worker <--> Dexie
+        Options <--> ChromeStore
+        Worker <--> ChromeStore
+    end
 
-| 检查 | 当前结果 |
-| :--- | :--- |
-| `pnpm compile` | WXT 类型生成与 TypeScript strict 检查通过 |
-| `pnpm test` | 17 个测试文件、145 项测试通过 |
-| `pnpm build` | Chrome MV3 构建成功，产物位于 `.output/chrome-mv3` |
-| 真实扩展回归 | 已验证 Bilibili 视频信息、字幕 CDN 权限、一键分析、Notion 实号同步；三 Tab 与 AI 答疑经真机截图回归 |
+    Content <--> Worker
+    Worker <--> Bili["Bilibili APIs<br/>view · WBI · subtitles · danmaku · playurl"]
+    Worker -->|"无字幕且用户选择"| AudioCDN["Bilibili Audio CDN<br/>temporary audio"]
+    AudioCDN -->|"音频字节"| Worker
+    Worker -->|"音频"| STT["OpenAI-compatible STT<br/>/audio/transcriptions"]
+    Worker <--> LLM["OpenAI-compatible LLM<br/>Chat Completions · SSE"]
+    Worker <--> Sync["Active Connector Router"]
+    Sync --> Notion["Notion API"]
+    Sync --> Ima["ima OpenAPI"]
+    Sync --> Yuque["Yuque OpenAPI"]
+    Sync --> MCP["Remote MCP"]
+    Sync --> Bridge["Local Bridge"]
+    Bridge --> Vault["Obsidian / Markdown Vault"]
+    Bridge --> Stdio["stdio MCP Server"]
+```
 
-验证数字对应当前开发快照，后续提交以本地实际命令输出和 CI 为准。
+### 运行边界
 
-## 功能进度
+| 边界 | 责任 | 不负责 |
+| --- | --- | --- |
+| [`entrypoints/content.ts`](entrypoints/content.ts) | 识别 Bilibili SPA 路由、返回当前播放时间、执行同 P 或跨 P 跳转 | 跨域请求、模型调用、数据持久化 |
+| [`entrypoints/sidepanel/`](entrypoints/sidepanel/) | 四个用户工作区、流式进度、Markdown 编辑与学习统计 | 持有长任务、直接调用第三方 API |
+| [`entrypoints/options/`](entrypoints/options/) | 模型 Profile、连接器、数据边界、导出与清空 | 保存业务笔记、编排分析 |
+| [`entrypoints/background.ts`](entrypoints/background.ts) | 消息路由、跨域请求、分析与 Chat Port、按需音轨下载和 STT、串行同步队列、Service Worker 恢复 | 展示状态、持有唯一业务数据副本 |
+| [`lib/`](lib/) | Bilibili、LLM、Transcribe、Summarization、Chat、Storage、Connector、Notion 与 Stats 领域模块 | UI 布局与浏览器页面操作 |
+| [`scripts/bridge.mjs`](scripts/bridge.mjs) | 仅监听 loopback 的 Markdown Bridge；把 stdio MCP 转为扩展可调用的 HTTP | 云端托管、凭据托管、远程访问 |
 
-### MVP · 打通学习闭环（已完成）
+Background Service Worker 是网络和长任务的编排中心。Content Script 只接触页面；Side Panel 与 Options 负责交互；Dexie 和 `chrome.storage` 承担持久化。这一划分同时匹配 MV3 生命周期、Host Permission 和可测试性边界。
 
-- [x] WXT + React + TypeScript 基础工程
-- [x] B 站视频信息、WBI 签名与字幕获取基础模块
-- [x] OpenAI-compatible 模型客户端基础模块
-- [x] IndexedDB 与模型配置存储基础模块
-- [x] Background API 编排与分析端口
-- [x] Content Script 视频上下文识别（含首开补注入与 URL 兜底）
-- [x] 长字幕 Map-Reduce 总结管线集成
-- [x] Side Panel 大纲、总结、流式进度与时间戳跳转
-- [x] 弹幕按分钟采样并作为可选分析上下文
-- [x] Markdown 笔记编辑、预览、自动保存与版本数据
-- [x] Notion 内部集成令牌、页面树同步与冲突保护
-- [x] 模型 / Notion 设置与本地数据导出、清空
-- [x] 拓展知识与注意事项完整接入（管线 / UI / 笔记 / 测试）
-- [x] 笔记元信息头（视频标题、分 P、UP 主、原视频链接、生成时间）
+## 核心流程
 
-### M4 · AI 答疑与学习辅导（已上线）
+### 1. 视频识别、字幕与语音转写
 
-- [x] 三 Tab 侧边栏：课程 / 对话 / 笔记 + CourseContextBar 置顶
-- [x] 播放快照、±60s 字幕窗口、上下文预算与完整度三态降级
-- [x] 回答结构（直接回答 / 分步解释 / 课程关系锚点 / 事实推断标注）与思考过程剥离
-- [x] 问答自动记录：幂等写入、边界标记、撤销 / 重新记录、会话持久化防重复
-- [x] 模型自带联网搜索（能力表驱动，不支持时明确提示 / 硬报错）
-- [x] 数据边界逐源开关（字幕 / 笔记摘录 / 播放元信息）
-- [x] 设计系统 v2：Lucide 图标、时间戳 pill、明暗双主题、吸顶三区
+1. Content Script 从当前 URL 提取 `bvid` 与分 P，监听 Bilibili SPA 路由变化，并暴露播放时间与 seek 消息。
+2. Background 查询活动标签页。若扩展重载前页面已打开，它会先补注入 Content Script；仍失败时退化为 URL 解析。
+3. Bilibili Adapter 调用 view API 获取 `aid`、`cid`、标题、封面、UP 主和分 P 信息，并在 Dexie 更新视频记录。
+4. 字幕请求使用 WBI 签名。轨道选择顺序为：中文人工字幕、其他人工字幕、中文字幕、首个可用轨道。
+5. 字幕 CDN JSON 被归一化为 `Cue[]`，按 `bvid + cid` 存储并在 24 小时内复用。可选弹幕只作为辅助上下文；获取失败不会阻断字幕分析。
+6. 没有字幕时，Background 先返回 `no-subtitle`。用户可保持降级状态、重试字幕，或主动选择“使用语音转写（Beta）”。转写路径读取 playurl、优先选择最低码率 DASH 音轨；无 DASH 时回退首个 `video/mp4` 混流，临时载入内存并上传到配置的 STT 服务，再把 `verbose_json` segments 归一化为 `Cue[]`。
 
-### 后续版本
+转写结果以 `source: stt` 写入字幕缓存，24 小时内可直接复用并进入正常分析；过期记录不会因此立即物理删除。音频或 MP4 字节不写入 IndexedDB。下载前后都会执行 25MB 上限检查，Phase 1 超限即停止，不会静默截断或伪造字幕。
 
-- **V2 续 · 理解效率**：知识点测验、任务级模型路由、AI 扩写与润色、网页剪藏、学习统计、全量笔记库与模板；
-- **V3 · 长期记忆**：间隔重复、Anki 导出、语义搜索、知识图谱、学习周报、多站点适配与 MCP 知识源接入。
+### 2. 课程分析
 
-## 参与开发
+```mermaid
+sequenceDiagram
+    actor User
+    participant Panel as Side Panel
+    participant BG as Background
+    participant Store as IndexedDB
+    participant Bili as Bilibili API
+    participant STT as User STT
+    participant Model as User LLM
 
-> [!WARNING]
-> 当前没有面向普通用户的安装包。以下命令用于贡献者开发，不能视为稳定安装指南。
+    User->>Panel: 一键分析
+    Panel->>BG: ANALYZE_PORT { bvid, p }
+    BG->>BG: 解析视频与分 P 身份
+    opt 5 分钟内存缓存未命中
+        BG->>Bili: view 视频元信息
+    end
+    BG->>Store: 更新视频记录
+    BG->>Store: 读取 AnalysisResult 缓存
+    alt 命中同模型缓存
+        Store-->>BG: AnalysisResult
+    else 需要生成
+        BG->>Store: 读取字幕缓存
+        alt 字幕缓存未命中
+            BG->>Bili: 字幕轨 + 字幕 JSON
+            opt 无字幕且用户选择 Beta 转写
+                BG->>Bili: playurl + 最低码率音轨
+                BG->>STT: 音频 + model + verbose_json
+                STT-->>BG: segments / text
+            end
+            BG->>Store: 保存归一化字幕
+        end
+        BG->>Model: 并发 Map 分块摘要
+        BG->>Model: SSE Reduce 全局合并
+        BG->>BG: 结构与时间戳校验，失败时修复一次
+        BG->>Store: 先保存 AnalysisResult
+    end
+    BG-->>Panel: scoped progress / done
+```
 
-建议环境：Node.js 20+、pnpm 9+、Chrome 或 Edge。
+分析管线的关键约束：
+
+- 缓存身份包含 `bvid + cid + Profile 名称 / 模型 / baseURL`，切换同名模型服务不会误用旧结果；
+- 字幕超过预算时使用 60% 上下文预算切块，块间保留约 30 秒重叠；Map 并发上限为 3；
+- Reduce 通过 SSE 流式返回，UI 可展示阶段和增量内容，也可取消；
+- 输出先解析为结构化 JSON，校验章节和时间戳；失败时只修复一次，再失败则保留原始 Markdown；
+- Background 先持久化结果，再发送 `done`；缓存写入失败不会被伪装成成功；
+- 分析结果会携带字幕来源；使用 STT 时 UI 明示“字幕为 AI 转写”；
+- 每个事件携带 `bvid + cid + p`，切换视频后的迟到事件会被 UI 丢弃。
+
+### 3. 随看随问
+
+```mermaid
+flowchart TD
+    Ask["用户提问"] --> Snapshot["冻结 bvid / cid / 分 P / 播放秒数"]
+    Snapshot --> Session["按 bvid + cid 取得 Session 与 Topic"]
+    Session --> Context["±60s 字幕 + 课程结构 + ≤800 字笔记 + 最近 6 轮"]
+    Context --> Privacy{"数据边界开关"}
+    Privacy --> Budget["6000 token 上限与裁剪"]
+    Budget --> Stream["OpenAI-compatible SSE 回答"]
+    Stream --> Turn["持久化 ChatTurn"]
+    Turn -->|"完整回答且允许自动记录"| CAS["按 chatEntryId 幂等追加，Note rev CAS"]
+    CAS --> Note["本地课程笔记"]
+    Note --> Delay["15 秒防抖合并同步"]
+```
+
+- 每个话题固定一个播放锚点；用户可以显式把后续问题更新到当前进度。
+- Context 完整度分为 `full`、`partial`、`none`。关闭课程内容发送或没有字幕时，Prompt 必须声明无法核对讲师原意。
+- 字幕和笔记以不可信数据边界包裹，伪造的边界标签会被中和。总结解析会剥离 `<think>` block；Chat 只兜底清理可识别的长前置思考稿，不保证过滤所有推理文本。
+- `clientRequestId` 防止重连重复生成，`ChatTurn.id` 同时作为 `chatEntryId`，支持定点撤销、不记录和重新记录。
+- 当前 provider-native Web Search 只对已知兼容端点启用；代码内置 Moonshot/Kimi `$web_search` 协议循环。未知 Provider 不会盲目发送 tools。
+- 取消会保留已产生的回答片段，但不会写入笔记；回答生成和笔记写入失败分别记录，互不覆盖。
+
+### 4. 笔记与同步
+
+本地 Markdown 笔记是系统唯一 source of truth：
+
+1. 课程分析可生成一份带视频元信息、原链接和时间锚点的笔记；对话也能按当前 `cid` 自动创建或找到目标笔记。
+2. 编辑器防抖保存。每次写入递增 `rev`，内容变化时在底层保留最近 10 个版本；当前 UI 尚未提供版本浏览或恢复入口。
+3. Chat 通过 Compare-And-Swap（CAS）追加问答块；与手工编辑冲突时读取最新版本并重放，最多重试 3 次，不静默覆盖。
+4. 保存后按当前激活连接器进入全局串行队列。Service Worker 重启会把遗留 `syncing` 恢复为 `pending` 并重新入队。
+5. 同步成功只清除本地 `dirty` 标记；连接器映射保存外部文档 ID 和状态，不替代本地笔记。
+
+## 知识库连接器
+
+连接器统一实现 `testConnection()` 与 `upsertCourseNote()`。同一时刻只有一个默认写入目标。当前同步方向是 **BiliNote → 外部知识库**，不会把外部内容拉入 Chat，也不承诺双向同步。
+
+| 预设 | 传输与写入语义 | 边界 |
+| --- | --- | --- |
+| **Notion** | Internal Integration Token；用户先选择根页面，连接器在其下建立“课程页 → 分 P 章节页”；归档旧 blocks 后整页重写 | 检测本地与远端双改冲突；不是 OAuth |
+| **ima（Beta）** | 官方 OpenAPI；首次导入 Markdown 并加入选定知识库，后续只追加新增尾部 | API 无整篇覆盖时，已同步前缀被改写会停止同步，避免重复或丢改动 |
+| **腾讯文档（Beta）** | 官方 Remote MCP；原始 `Authorization` Token | 工具能力与参数由端点返回结果映射 |
+| **飞书文档（Beta）** | 个人 Remote MCP URL，URL 本身作为凭据 | 工具能力与参数由端点返回结果映射 |
+| **Custom Remote MCP** | 公网 HTTPS MCP；`initialize → tools/list → tools/call` | 保存时静态拦截 loopback、常见私网字面地址和明文 HTTP；按精确 origin 申请权限 |
+| **Obsidian** | 本机 Markdown Bridge 写入 Vault 内 `BiliNote/` 目录 | Bridge 只监听 `127.0.0.1`，要求 Bearer Token 和 root 路径 containment |
+| **语雀（Beta）** | 官方 OpenAPI；Token 鉴权后选择目标知识库，首次新建 Markdown 文档，后续整篇更新 | 当前仅支持 `yuque.com` 官方云域名；目录写入失败时文档仍会保留，可在语雀内手动编排 |
+
+MCP 写入会从工具名和常见参数名推断 `create`、`append` 或 `update` 能力，因此 Remote MCP 预设属于适配层，不等于任意 MCP Server 都能无配置工作。
+
+## 数据模型
+
+### IndexedDB：业务数据
+
+Dexie 数据库名为 `bilinote`：
+
+| 表 | 主键 / 身份 | 内容 |
+| --- | --- | --- |
+| `videos` | `bvid` | 视频元信息、分 P、首次与最近访问时间 |
+| `subtitles` | `bvid + cid` | 归一化字幕 Cue、语言、人工 / Bilibili AI / STT 来源、缓存时间 |
+| `summaries` | `bvid + cid + modelId` | 结构化课程分析与输入 token 粗估 |
+| `notes` | 自增 ID | Markdown、模板、来源、`dirty`、`rev` 与时间戳 |
+| `noteVersions` | 自增 ID | 每份笔记最近 10 个内容版本 |
+| `chatSessions` | `bvid + cid` | 课程会话与目标笔记 |
+| `chatTopics` | Topic ID | 话题标题和固定播放锚点 |
+| `chatTurns` | Turn ID / `clientRequestId` | 问题、回答、生成状态和写笔记状态 |
+| `notionMappings` | Note ID | Notion 页面树、scope、冲突基线和同步状态 |
+| `connectorSync` | Note ID + Connector ID | 非 Notion 外部文档 ID 和同步状态 |
+
+### chrome.storage：配置
+
+| 存储域 | 内容 | 是否进入浏览器同步 |
+| --- | --- | --- |
+| `chrome.storage.local` | 模型 Profile 与 API Key、语音转写 baseURL / API Key / model、Notion Token、Connector Profile 与凭据 | 否 |
+| `chrome.storage.sync` | 主题、激活模型、上下文预算、分析与 Chat 偏好、数据边界开关 | 浏览器开启同步时可能同步 |
+
+数据导出包含业务表和偏好，不包含模型 API Key、语音转写 API Key、Notion Token、MCP Token、ima 凭据等连接配置。清空本地数据会删除 Dexie、`storage.local` 和 `storage.sync`，界面要求二次确认。
+
+## 数据与隐私
+
+BiliNote 的 Local-first 指“业务数据默认以本地浏览器为主”，不代表 AI 推理在本地运行。触发分析、问答或同步时，以下数据会发送到明确的外部目的地：
+
+| 目的地 | 发送内容 | 触发条件 |
+| --- | --- | --- |
+| Bilibili API / 字幕与媒体 CDN | 视频 ID、分 P、字幕请求；请求可能携带当前 Bilibili 登录态。仅在用户选择语音转写时请求 playurl，并临时下载当前分 P 的 DASH 音轨或 MP4 混流 | 打开视频、分析、Chat 缺少字幕缓存，或用户主动转写 |
+| 用户配置的模型端点 | 分析字幕；或 Chat 的最小上下文与问题 | 用户主动分析或提问 |
+| 用户配置的语音转写端点 | 当前分 P 的 DASH 音频或 MP4 混流、所选 model；“测试”操作会发送 1 秒本地生成的静音 WAV | 用户点击“使用语音转写”或测试 STT 连接 |
+| 当前激活知识库连接器 | 目标笔记 Markdown 与课程 / 分 P 标题 | 手动同步或已启用的自动同步 |
+| 无 | 本地学习统计 | 直接从 Dexie 计算，不发送遥测 |
+
+Chat 提供三个逐源开关：课程内容、当前笔记摘录、播放元信息。代码默认开启，但只组装当前问题需要的字幕窗口和受限摘录；任一来源都能在 Options 中关闭。
+
+配置默认写入连接器后，自动同步偏好默认为开启；未配置连接器时不会发出远端写入。
+
+安全边界：
+
+- 模型、STT API Key 与知识库凭据只写入 `chrome.storage.local`，不会进入数据导出或 `storage.sync`；
+- `chrome.storage.local` 是浏览器 Profile 内的本地存储，不是加密保险箱或硬件密钥库；
+- 保存模型或 STT 配置时会拒绝非 loopback `http://`；测试动作本身也会发送 Key 与请求，因此不要测试不可信的明文端点。Remote MCP 会静态拦截常见本机与私网字面地址，但这不构成 DNS 或网络级沙箱，只应连接可信端点；
+- 模型、STT、远端连接器与 Local Bridge 按实际 origin 请求 Optional Host Permission；Bilibili、字幕与音频 CDN 是固定权限；
+- 音频只在一次转写任务的内存中暂存，不写入 Dexie；`declarativeNetRequest` 规则只为 `bilivideo.com` 音轨请求补充 Bilibili `Referer`；
+- AI Markdown 经 DOMPurify 清洗后再渲染；
+- 字幕和用户笔记在 Prompt 中被标记为不可信数据，并中和伪造的边界标签，以降低 prompt injection 风险；
+- 项目源码未包含遥测、广告 SDK 或托管账号系统。
+
+### 浏览器权限
+
+| 权限 | 用途 |
+| --- | --- |
+| `storage` | 保存本地配置和偏好 |
+| `sidePanel` | 在视频旁提供持续学习界面 |
+| `scripting` | 扩展安装或重载后，为已经打开的视频页补注入 Content Script |
+| `declarativeNetRequest` | 仅为 `bilivideo.com` 音轨下载补充 Bilibili `Referer`，避免 CDN 防盗链返回 403 |
+| `*://*.bilibili.com/*` | 视频信息、WBI、字幕轨与页面上下文 |
+| `*://*.hdslb.com/*` | 下载 Bilibili 返回的字幕 CDN JSON |
+| `*://*.bilivideo.com/*` | 仅在用户选择语音转写时临时下载当前分 P 音轨 |
+| 可选 `*://*/*` | 只在用户测试、保存或连接模型、STT 与远端连接器时，按具体 origin 请求授权 |
+
+## 快速开始
+
+### 安装 v0.1.1 发布包
+
+1. 从 [BiliNote v0.1.1 GitHub Release](https://github.com/AliceDel66/BiliNote/releases/tag/v0.1.1) 下载 `bilinote-0.1.1-chrome.zip` 并解压；
+2. 打开 `chrome://extensions`，启用“开发者模式”；
+3. 点击“加载已解压的扩展程序”，选择解压目录；
+4. 打开 BiliNote Options，配置自己的模型 API，以及可选的语音转写与知识库连接。
+
+当前是未上架 Chrome Web Store 的 pre-alpha 开发者包。升级时先解压新版本，再在扩展管理页重新加载对应目录；配置与本地数据仍由浏览器扩展存储管理。
+
+### 前置条件
+
+- Node.js `^20.19.0` 或 `>=22.12.0`（当前 lockfile 中构建工具链的要求）；
+- pnpm；
+- Chrome；当前仓库只构建并验证 Chrome MV3，其他 Chromium 浏览器未形成兼容性承诺；
+- 一个 OpenAI Chat Completions compatible 模型服务，以及自己的 API Key；
+- 一个 Bilibili 视频；无可用字幕时，需要另行配置 OpenAI-compatible 语音转写服务。
+
+### 从源码运行
 
 ```bash
 git clone https://github.com/AliceDel66/BiliNote.git
 cd BiliNote
 pnpm install
-
-pnpm compile   # 生成 WXT 类型并运行 TypeScript 检查
-pnpm test      # 运行 Vitest
-pnpm dev       # 启动 WXT 开发模式
-pnpm build     # 构建扩展
-pnpm zip       # 生成分发包
-pnpm verify:bili # 联网检查 Bilibili 视频信息 / 字幕接口
+pnpm compile
+pnpm test
+pnpm dev
 ```
 
-### 本地加载与试用
+然后：
 
-1. 运行 `pnpm build`；
-2. 打开 `chrome://extensions`，启用“开发者模式”；
-3. 点击“加载已解压的扩展程序”，选择 `.output/chrome-mv3`；
-4. 打开扩展设置页，新增 `baseURL + API Key + 默认模型`，先执行“拉取模型列表”或“测试连接”；
-5. 打开有可用字幕的 Bilibili 视频页，点击扩展图标打开 Side Panel，再执行“一键分析”；
-6. （可选）在「对话」Tab 随看随问；在设置页粘贴 Notion 内部集成令牌并选择根页面，即可自动同步笔记。
+1. 打开 `chrome://extensions`；
+2. 启用“开发者模式”；
+3. 点击“加载已解压的扩展程序”，选择 `.output/chrome-mv3-dev`；
+4. 打开 BiliNote Options，新增 `name + baseURL + API Key + default model`；
+5. 拉取模型列表或测试连接，并授权该模型服务的 origin；
+6. 打开 Bilibili 视频，点击扩展图标打开 Side Panel；无字幕时可继续配置并使用 Beta 语音转写。
 
-使用 `pnpm dev` 时加载 `.output/chrome-mv3-dev`。自定义模型端点会按域名请求可选 Host Permission；请只授权你信任的服务。Bilibili 登录状态、视频字幕开放情况和模型服务可用性都会影响结果。
+生产构建使用：
 
-## 架构设计
-
-```mermaid
-flowchart TB
-    subgraph Extension["Browser Extension · Manifest V3"]
-        Content["Content Script\n页面识别、播放器联动、播放时间"]
-        Panel["Side Panel\n课程 / 对话 / 笔记 三 Tab"]
-        Options["Options\n模型、同步与数据边界设置"]
-        Worker["Background Service Worker\n分析与问答编排、Notion 同步队列"]
-        Store[("IndexedDB / chrome.storage")]
-
-        Content <--> Worker
-        Panel <--> Worker
-        Options <--> Worker
-        Panel <--> Store
-        Options <--> Store
-        Worker <--> Store
-    end
-
-    Bilibili["Bilibili APIs"]
-    LLM["OpenAI-compatible LLM\n（含模型自带 web search）"]
-    Notion["Notion API"]
-
-    Worker <--> Bilibili
-    Worker <--> LLM
-    Worker <--> Notion
+```bash
+pnpm build
 ```
 
-### 技术栈
+构建产物位于 `.output/chrome-mv3`，可按相同步骤加载。`pnpm zip` 用于生成可分发压缩包。
 
-| 层 | 选型 | 用途 |
-| :--- | :--- | :--- |
-| 扩展框架 | WXT · Manifest V3 | 入口、构建与浏览器扩展能力 |
-| 前端 | React 18 · TypeScript · Tailwind CSS v4 | Side Panel 与设置界面 |
-| 图标 | Lucide（inline SVG 组件） | 全界面图标体系 |
-| Markdown | marked · DOMPurify | 笔记预览与 AI 输出安全渲染 |
-| 视频适配 | Bilibili Web APIs（非官方）· WBI | 视频信息、字幕与章节上下文 |
-| 模型层 | OpenAI Chat Completions compatible API · SSE · tools | 多模型接入、流式生成与模型自带联网 |
-| 本地数据 | IndexedDB（Dexie）· `chrome.storage` | 笔记、会话、缓存、密钥与偏好 |
-| 知识库 | Notion API · Internal Integration Token | Markdown 转 blocks、页面树、整页替换与冲突保护 |
-| 工程化 | pnpm · WXT/Vite · Vitest · fake-indexeddb | 开发、构建、测试与打包 |
+### 为无字幕视频配置 Groq 语音转写
 
-### 当前目录
+[Groq](https://groq.com/) 的 GroqCloud 提供可免费开始的 Free tier 和 OpenAI-compatible Speech-to-Text。当前 BiliNote 配置示例，无需修改 `.env`：
+
+| 字段 | 示例 |
+| --- | --- |
+| `baseURL` | `https://api.groq.com/openai/v1` |
+| `API Key` | 从 Groq Console 创建的 `gsk_...` |
+| `model` | `whisper-large-v3-turbo`（速度优先）或 `whisper-large-v3`（准确率优先） |
+
+1. 打开 Options → “语音转写（Beta）”，填入三项配置；
+2. 点击“测试”。扩展会先申请 Groq origin 权限，再发送 1 秒本地生成的静音 WAV；该请求也会消耗服务额度；
+3. 测试成功后保存；
+4. 打开无字幕视频并发起分析，出现 `no-subtitle` 后点击“使用语音转写（Beta）”。
+
+当前实现按单文件 25MB 上限工作，不做切片。超长视频可能因最低码率音轨仍超限而无法转写；无 DASH 时还可能上传 MP4 混流。转写成功后只保存归一化文字与时间段，24 小时内复用，不保存媒体字节。Groq 免费额度、速率限制、价格和模型可用性可能变化，以其官网与 [Speech-to-Text 文档](https://console.groq.com/docs/speech-to-text)为准。
+
+### 连接 Obsidian 或本地 Markdown
+
+Bridge 需要 Node.js 20 或更高版本，只监听本机：
+
+```bash
+node scripts/bridge.mjs --root "/absolute/path/to/your/vault"
+```
+
+如果省略 `--token`，Bridge 会生成一次性 Token 并打印。把端口和 Token 填入 Options 的 Obsidian 连接。查看完整参数与 stdio MCP 代理方式：
+
+```bash
+node scripts/bridge.mjs --help
+```
+
+## 开发参考
+
+### 常用命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `pnpm dev` | 启动 WXT 开发模式 |
+| `pnpm compile` | 生成 WXT 类型并运行 TypeScript `--noEmit` 检查 |
+| `pnpm test` | 运行 Vitest 测试套件 |
+| `pnpm build` | 构建 Chrome MV3 扩展 |
+| `pnpm zip` | 打包扩展 |
+| `pnpm verify:bili` | 对 Bilibili view、WBI、字幕轨和字幕 CDN 做只读实网验证 |
+| `node scripts/bridge.mjs --help` | 查看 Markdown Bridge 与 MCP proxy 参数 |
+
+`pnpm verify:bili` 会访问实时 Bilibili API，不属于离线测试；匿名请求可能找不到字幕，但仍能验证 WBI 链路。
+
+### 目录结构
 
 ```text
 BiliNote/
 ├── entrypoints/
-│   ├── background.ts       # 消息路由、分析/问答编排、Notion 同步队列
-│   ├── content.ts          # 视频上下文、播放器跳转与播放时间
-│   ├── sidepanel/          # 三 Tab 主界面 + ChatView 答疑视图
-│   └── options/            # 模型、Notion、数据边界、偏好与数据管理
-├── components/             # ui 原语、Lucide 图标、Tabs、Markdown 预览、时间戳 pill
+│   ├── background.ts          # 消息、分析、Chat 与同步编排
+│   ├── content.ts             # 视频上下文、播放时间与跳转
+│   ├── sidepanel/             # 课程 / 对话 / 笔记 / 我的
+│   └── options/               # 模型、连接器、隐私与数据管理
+├── components/                # UI 原语、Markdown、Tabs、图标与时间戳
 ├── lib/
-│   ├── bilibili/           # 视频信息、WBI、字幕、弹幕与 URL 解析
-│   ├── chat/               # 上下文、Prompt、问答写笔记、会话存储、联网能力
-│   ├── llm/                # OpenAI-compatible Client（SSE · tools）
-│   ├── notion/             # Notion Client、Markdown 转换与同步
-│   ├── storage/            # IndexedDB、模型与 Notion 配置
-│   └── summarize/          # 分块、Prompt、校验与结果转换
-├── test/                   # Vitest 单元与协议回归测试
-├── scripts/                # 联网验证脚本
-├── package.json            # 开发、测试、构建与打包命令
-├── wxt.config.ts           # Manifest V3 与权限配置
-├── tsconfig.json           # TypeScript strict 配置
-└── README.md
+│   ├── bilibili/              # URL、WBI、视频、字幕、弹幕与音轨
+│   ├── summarize/             # 分块、Prompt、Map-Reduce 与校验
+│   ├── llm/                   # OpenAI-compatible Client 与 SSE
+│   ├── transcribe/            # OpenAI-compatible STT 与转写错误映射
+│   ├── chat/                  # 上下文、Prompt、存储、联网与笔记写入
+│   ├── storage/               # Dexie 与 chrome.storage
+│   ├── notion/                # Notion Client、Markdown 转 blocks、同步
+│   ├── connectors/            # Registry、MCP、ima、语雀、Notion 与 Local Bridge
+│   └── stats/                 # 本地学习事件与统计聚合
+├── scripts/
+│   ├── bridge.mjs             # Local Markdown Bridge / stdio MCP proxy
+│   └── verify-bili.mjs        # Bilibili 只读实网验证
+├── test/                      # Vitest 单元、协议与回归测试
+├── public/                    # 扩展图标与 Logo
+├── wxt.config.ts              # MV3 Manifest 与 Host Permission
+└── package.json               # 命令与依赖
 ```
 
-运行时边界：页面识别与播放器操作留在 Content Script；跨域请求和长任务留在 Background Service Worker；Side Panel 与 Options 直接读写本地数据，并通过消息协议调用 Background。
+### 设计约束
 
-## 隐私与权限
+- **最小视频读取**：常规路径只读元信息、字幕和可选弹幕；仅在用户主动选择 STT 时临时下载当前分 P 音轨，不保存完整视频，也不上传内容到 Bilibili；
+- **非官方上游**：Bilibili Web API、登录状态、字幕开放情况和接口变更都可能影响结果；
+- **本地笔记优先**：远端同步失败不应破坏本地内容；
+- **单一默认写入目标**：连接器不是多目的地 fan-out，也不是双向同步引擎；
+- **协议隔离**：UI 与 Background 通过 typed message / Port 协议通信；
+- **失败可见**：无字幕、模型鉴权、限流、截断和同步冲突有可区分的错误路径；权限或网络配置失败会反馈到操作界面，部分连接器不区分两者；
+- **身份与幂等**：分析事件绑定视频，笔记使用 `rev`，Chat 使用 `clientRequestId` / `chatEntryId`。
 
-BiliNote 以 **Local-first、BYOK、最小权限、可审计** 为设计约束。
+## 参与贡献
 
-| 权限或数据 | 用途 | 边界 |
-| :--- | :--- | :--- |
-| `storage` | 保存模型配置、偏好、字幕缓存与笔记 | API Key 仅进入 `chrome.storage.local` |
-| `sidePanel` | 提供不打断视频的学习界面 | 不修改视频页面主体布局 |
-| `scripting` | 为扩展安装/重载前已打开的标签页补注入 Content Script | 仅用于恢复视频识别能力 |
-| `*://*.bilibili.com/*` | 获取当前用户可访问的视频信息与字幕 | 不做批量抓取或视频下载 |
-| `*://*.hdslb.com/*` | 获取 Bilibili 实际返回的字幕 CDN JSON | 仅用于字幕资源；已有权限回归测试 |
-| 可选 `*://*/*` | 连接用户主动配置的模型与 Notion 服务 | 应在需要时单独授权，不作为默认数据出口 |
+Bug 报告、文档修正、测试、连接器适配和代码贡献都欢迎。
 
-- 当前代码未引入遥测或广告依赖；
-- 字幕仅应发送到用户自己配置的模型端点；答疑上下文另有「数据边界」逐源开关（字幕窗口 / 笔记摘录 / 播放元信息）；
-- AI 回答使用课程上下文时以明确标记包裹不可信数据，防止提示注入；模型思考过程不入库；
-- AI Markdown 输出经 DOMPurify 清洗后渲染；
-- API Key 与 Notion Token 保存在 `chrome.storage.local`，数据导出会主动排除两者；
-- 权限、网络行为与发布包将在首个 release 前单独审计。
+1. 先搜索现有 [Issues](https://github.com/AliceDel66/BiliNote/issues)，较大改动先说明问题、用户结果和边界；
+2. 从 `main` 创建聚焦分支，避免把无关重构混入同一 PR；
+3. 核心逻辑变化需要补测试，网络适配需要覆盖成功、鉴权、超时、协议错误和凭据脱敏；
+4. 提交前至少运行 `pnpm compile` 与 `pnpm test`；涉及 Manifest 或打包时再运行 `pnpm build`；
+5. PR 写明动机、行为变化、验证证据、数据 / 权限影响和已知限制。
 
-## 路线图
-
-| 里程碑 | 状态 | 完成标准 |
-| :--- | :---: | :--- |
-| **M0 · Blueprint** | 已完成 | 产品边界、架构和路线图明确 |
-| **M1 · Foundation** | 已完成 | 可运行扩展骨架、核心模块、测试与构建可用 |
-| **M2 · MVP** | 已完成 | 分析 → 笔记主链路落地，拓展知识 / 注意事项与元信息头齐备 |
-| **M3 · Sync** | 已完成 | Internal Integration 页面树同步、冲突保护、实号回归通过；OAuth 后置 |
-| **M4 · Learning** | 进行中 | 三 Tab + AI 答疑 + 联网搜索 + 数据边界已上线；测验、复习与多站点待做 |
-
-## 贡献指南
-
-BiliNote 欢迎 Bug 报告、功能讨论、文档改进与代码贡献。
-
-1. 提交较大改动前，先创建 [Issue](https://github.com/AliceDel66/BiliNote/issues/new) 说明问题、目标与边界；
-2. Fork 仓库，从 `main` 创建小而清晰的功能分支；
-3. 保持改动聚焦，新增核心逻辑时同步补充测试；
-4. 提交 PR 前运行 `pnpm compile` 与 `pnpm test`；
-5. PR 中写明动机、实际变化、验证结果和已知限制。
-
-优先贡献方向：Bilibili Adapter 稳定性、Prompt 评测、知识点测验、MCP 知识源 Profile、无障碍体验、测试覆盖与文档。
-
-## English summary
-
-<details>
-<summary><strong>Read the English overview</strong></summary>
-
-### Turn Bilibili videos into searchable, reviewable knowledge
-
-BiliNote is an early-stage, open-source browser extension for focused video learning. It extracts Bilibili subtitles and optional danmaku context, generates structured notes with a user-selected AI model, preserves timestamp links, stores notes and chat sessions locally, and syncs them to Notion.
-
-**Status:** pre-alpha. The full loop is implemented: video detection → subtitle analysis → timestamped notes → Notion sync, plus a three-tab side panel (Course / Chat / Notes) with AI Q&A that understands your current playback position, model-native web search (e.g. Kimi `$web_search`), and per-source privacy controls. Notion currently uses a manually configured Internal Integration Token rather than OAuth. No stable end-user release is available yet.
-
-#### Principles
-
-- **Local-first:** learning data stays in the browser by default.
-- **BYOK:** users choose and configure their own model provider.
-- **Model-agnostic:** the model layer targets OpenAI-compatible APIs.
-- **Privacy-controlled:** minimal context exposure by default, with per-source switches for what may be sent to the model.
-- **Open and auditable:** permissions, network behavior, and data flows remain inspectable.
-
-Contributions are welcome. See [Development](#参与开发), [Roadmap](#路线图), and [Contributing](#贡献指南).
-
-</details>
+公开 Issue、日志和截图中不要粘贴 API Key、Token、私有 MCP URL、课程私密内容或浏览器个人数据。
 
 ## License
 
-BiliNote is released under the [MIT License](LICENSE).
+BiliNote 以 [MIT License](LICENSE) 发布。
 
-> BiliNote 是独立社区开源项目，与哔哩哔哩、Notion 及任何模型供应商不存在官方隶属或背书关系。相关商标归各自权利人所有。
+BiliNote 是独立社区开源项目。除上文明确标注的赞助关系外，项目与哔哩哔哩、Notion、ima、Groq 或其他模型与文档服务商不存在官方隶属或背书关系。相关商标归各自权利人所有。
 
 ---
 
 <div align="center">
 
-如果这个方向对你有价值，欢迎点亮 Star、提交 Issue 或参与实现。
-
 **让“看过”变成“理解过、记录过、还能找回来”。**
+
+[提交 Issue](https://github.com/AliceDel66/BiliNote/issues/new) · [查看源码](https://github.com/AliceDel66/BiliNote) · [English](README.en.md)
 
 </div>
