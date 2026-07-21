@@ -192,13 +192,14 @@ describe('上下文预算裁剪（§5.3：noteExcerpt → keyPointsBrief → out
     expect(fitted.compactOutline).toBeDefined();
   });
 
-  it('极小预算按顺序全部裁掉，但窗口字幕与播放快照保留', () => {
+  it('极小预算按顺序全部裁掉，窗口字幕按硬上限截断（播放快照保留）', () => {
     const ctx = fatCtx();
     const fitted = fitContextToBudget(ctx, question, 1);
     expect(fitted.noteExcerpt).toBeUndefined();
     expect(fitted.keyPointsBrief).toBeUndefined();
     expect(fitted.compactOutline).toBeUndefined();
-    expect(fitted.subtitleWindow).toBe(ctx.subtitleWindow);
+    // 硬上限：字幕窗口自身也被截断，绝不保留超预算内容
+    expect(fitted.subtitleWindow.length).toBeLessThan(ctx.subtitleWindow.length);
     expect(fitted.snapshot).toBe(ctx.snapshot);
   });
 });

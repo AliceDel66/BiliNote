@@ -37,7 +37,8 @@ import {
   deleteNote,
   getNote,
   listNotesByVideo,
-  saveNote,
+  NoteRevConflict,
+  saveNoteCAS,
   type NoteRow,
   type NotionMappingRow,
 } from '../../lib/storage';
@@ -48,7 +49,13 @@ import {
   type VideoContextInfo,
 } from '../../lib/messages';
 import type { Completeness } from '../../lib/chat';
-import { analysisToMarkdown, type AnalysisResult } from '../../lib/summarize';
+import {
+  analysisToMarkdown,
+  canSaveAnalysisToVideo,
+  isStaleAnalyzeEvent,
+  type AnalysisResult,
+  type VideoIdentity,
+} from '../../lib/summarize';
 
 type Status =
   | 'loading'
@@ -111,6 +118,8 @@ export default function App() {
   const [status, setStatus] = useState<Status>('loading');
   const [ctx, setCtx] = useState<VideoContextInfo | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  /** 结果绑定的视频身份（C1）：done/done-cached 事件携带，缺省回退到发起分析时的上下文 */
+  const [resultId, setResultId] = useState<VideoIdentity | null>(null);
   const [cached, setCached] = useState(false);
   const [error, setError] = useState('');
   const [progress, setProgress] = useState<ProgressState>({ text: '', streamText: '', pct: 0 });
@@ -127,12 +136,16 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [syncInfo, setSyncInfo] = useState<NotionMappingRow | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
+  /** 笔记区内联提示（身份守卫拦截 / CAS 冲突刷新） */
+  const [noteNotice, setNoteNotice] = useState('');
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const savedDraftRef = useRef(savedDraft);
   savedDraftRef.current = savedDraft;
   const activeNoteIdRef = useRef(activeNoteId);
   activeNoteIdRef.current = activeNoteId;
+  /** 当前加载笔记的修订号（C3 CAS），加载/保存成功/冲突刷新时同步 */
+  const noteRevRef = useRef(1);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeNote = notes.find((n) => n.id === activeNoteId);
@@ -150,8 +163,10 @@ export default function App() {
       // 切换了视频/分P → 重置结果视图
       if (!prev || prev.bvid !== next.bvid || prev.p !== next.p) {
         setResult(null);
+        setResultId(null);
         setCached(false);
         setError('');
+        setNoteNotice('');
         setStatus((s) => (s === 'analyzing' ? s : 'ready'));
       } else {
         setStatus((s) => (s === 'loading' || s === 'no-video' ? 'ready' : s));
@@ -180,13 +195,22 @@ export default function App() {
     stopPort();
     setStatus('analyzing');
     setResult(null);
+    setResultId(null);
     setCached(false);
     setError('');
     setProgress({ text: '准备中…', streamText: '', pct: 0 });
 
     const port = browser.runtime.connect({ name: ANALYZE_PORT });
     portRef.current = port;
+    // C1：done/done-cached 携带 {bvid, cid, p}，记入结果身份；旧后台缺省时回退到发起时的上下文
+    const captureResultId = (e: AnalyzePortEvent) => {
+      const id = e as { bvid?: string; cid?: number; p?: number };
+      setResultId({ bvid: id.bvid ?? c.bvid, cid: id.cid ?? c.cid, p: id.p ?? c.p });
+    };
     port.onMessage.addListener((e: AnalyzePortEvent) => {
+      // C1：事件身份与当前视频不匹配（切视频后旧端口的迟到事件）→ 整体丢弃；
+      // 后台已按正确 bvid 缓存，切回时会命中缓存
+      if (isStaleAnalyzeEvent(e as { bvid?: string; cid?: number }, ctxRef.current)) return;
       switch (e.type) {
         case 'chunk-start':
           setProgress((p) => ({
@@ -209,11 +233,13 @@ export default function App() {
           setProgress((p) => ({ ...p, streamText: e.text }));
           break;
         case 'done':
+          captureResultId(e);
           setResult(e.result);
           setStatus('done');
           stopPort();
           break;
         case 'done-cached':
+          captureResultId(e);
           setResult(e.result);
           setCached(true);
           setStatus('done');
@@ -283,7 +309,7 @@ export default function App() {
     return () => clearInterval(timer);
   }, [activeNoteId, refreshSyncInfo]);
 
-  /** 立即落盘未保存的草稿（切换笔记 / 卸载前调用） */
+  /** 立即落盘未保存的草稿（切换笔记 / 卸载前调用）。C3 CAS：冲突时用最新内容刷新编辑器，绝不静默覆盖问答追加 */
   const flushDraft = useCallback(async () => {
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
@@ -294,10 +320,24 @@ export default function App() {
     if (!id || content === savedDraftRef.current) return;
     setSaving(true);
     try {
-      await saveNote(id, { contentMd: content });
+      const rev = noteRevRef.current;
+      await saveNoteCAS(id, { contentMd: content }, rev);
+      noteRevRef.current = rev + 1;
       setSavedDraft(content);
       void browser.runtime.sendMessage({ type: 'noteSaved', noteId: id }).catch(() => {});
       void refreshSyncInfo(id);
+    } catch (e) {
+      if (e instanceof NoteRevConflict) {
+        // 期间有问答记录被追加进笔记：以最新内容为准刷新编辑器（§9.13）
+        const { latest } = e;
+        noteRevRef.current = latest.rev ?? 1;
+        setDraft(latest.contentMd);
+        setSavedDraft(latest.contentMd);
+        setNoteNotice('检测到新问答记录，笔记已刷新');
+        void refreshSyncInfo(id);
+      } else {
+        throw e;
+      }
     } finally {
       setSaving(false);
     }
@@ -367,6 +407,7 @@ export default function App() {
         if (!note) return;
         if (activeNoteIdRef.current !== m.noteId) return;
         if (draftRef.current !== savedDraftRef.current) return;
+        noteRevRef.current = note.rev ?? 1;
         setDraft(note.contentMd);
         setSavedDraft(note.contentMd);
       });
@@ -385,10 +426,12 @@ export default function App() {
       const note = await getNote(noteId);
       if (!note) return;
       setActiveNoteId(note.id ?? null);
+      noteRevRef.current = note.rev ?? 1;
       setDraft(note.contentMd);
       setSavedDraft(note.contentMd);
       setPreview(true);
       setSyncInfo(null);
+      setNoteNotice('');
       if (note.id) void refreshSyncInfo(note.id);
     },
     [flushDraft, loadNotes, refreshSyncInfo],
@@ -412,9 +455,11 @@ export default function App() {
     prevBvidRef.current = bvid;
     void flushDraft().then(() => {
       setActiveNoteId(null);
+      noteRevRef.current = 1;
       setDraft('');
       setSavedDraft('');
       setSyncInfo(null);
+      setNoteNotice('');
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在 bvid 变化时触发
   }, [ctx?.bvid, flushDraft]);
@@ -430,10 +475,12 @@ export default function App() {
     if (note.id === activeNoteId) return;
     await flushDraft();
     setActiveNoteId(note.id ?? null);
+    noteRevRef.current = note.rev ?? 1;
     setDraft(note.contentMd);
     setSavedDraft(note.contentMd);
     setPreview(false);
     setSyncInfo(null);
+    setNoteNotice('');
   };
 
   /** 分析完成 → 存为笔记（标题 = 视频标题 + 分P，内容 = 元信息头 + 大纲 + 分段总结等） */
@@ -441,6 +488,12 @@ export default function App() {
     const c = ctxRef.current;
     const r = result;
     if (!c || !r) return;
+    // 身份守卫（C1）：结果属于上一个视频时禁止写入当前视频笔记
+    if (!canSaveAnalysisToVideo(resultId, c)) {
+      setNoteNotice('该结果来自上一个视频，已切换，无法保存到当前视频笔记');
+      return;
+    }
+    setNoteNotice('');
     await flushDraft();
     const part =
       c.pages.length > 1 && c.pages[c.p - 1] ? ` · P${c.p} ${c.pages[c.p - 1].part}` : '';
@@ -453,13 +506,14 @@ export default function App() {
         partLabel:
           c.pages.length > 1 ? `P${c.p} ${c.pages[c.p - 1]?.part ?? ''}` : undefined,
         owner: c.owner,
-        url: `https://www.bilibili.com/${c.bvid}${c.p > 1 ? `?p=${c.p}` : ''}`,
+        url: `https://www.bilibili.com/video/${c.bvid}${c.p > 1 ? `?p=${c.p}` : ''}`,
         generatedAt: new Date(),
       }),
       source: 'ai',
     });
     await loadNotes(c.bvid);
     setActiveNoteId(note.id ?? null);
+    noteRevRef.current = note.rev ?? 1;
     setDraft(note.contentMd);
     setSavedDraft(note.contentMd);
     setPreview(true);
@@ -475,9 +529,11 @@ export default function App() {
     await deleteNote(note.id);
     if (activeNoteId === note.id) {
       setActiveNoteId(null);
+      noteRevRef.current = 1;
       setDraft('');
       setSavedDraft('');
       setSyncInfo(null);
+      setNoteNotice('');
     }
     if (ctxRef.current) await loadNotes(ctxRef.current.bvid);
   };
@@ -855,6 +911,13 @@ export default function App() {
             />
 
             <div className="space-y-3">
+              {noteNotice && (
+                <p className="flex items-start gap-1.5 rounded-[10px] bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+                  <TriangleAlertIcon size={14} className="mt-[1px] shrink-0" />
+                  <span>{noteNotice}</span>
+                </p>
+              )}
+
               {notes.length === 0 && (
                 <p className="text-xs text-ink-2 dark:text-ink-2-dark">
                   当前视频还没有笔记。完成分析后点击「存为笔记」即可生成。

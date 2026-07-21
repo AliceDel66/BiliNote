@@ -72,6 +72,8 @@ export default function ChatView(props: {
   const [toolNotice, setToolNotice] = useState<string | null>(null);
   const [busyTurnId, setBusyTurnId] = useState<string | null>(null);
   const portRef = useRef<Browser.runtime.Port | null>(null);
+  /** generating 的同步镜像：send 双重守卫与 onDisconnect 复位用（state 闭包会过期） */
+  const generatingRef = useRef<Generating | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
 
   const topics = chatState?.topics ?? [];
@@ -110,14 +112,25 @@ export default function ChatView(props: {
 
   const send = async () => {
     const question = input.trim();
-    if (!question || generating) return;
-    await props.flushDraft();
+    // 同步守卫（ref 即时生效）：双击 / 双击 Enter 无法穿过；已有端口在用时直接拒绝，防并发混流
+    if (!question || generatingRef.current || portRef.current) return;
     const clientRequestId = crypto.randomUUID();
+    const gen: Generating = { clientRequestId, question, stage: 'preparing', partial: '' };
+    generatingRef.current = gen;
+    setGenerating(gen);
     setError('');
     setToolNotice(null);
     setToast(null);
     setInput('');
-    setGenerating({ clientRequestId, question, stage: 'preparing', partial: '' });
+    try {
+      await props.flushDraft();
+    } catch {
+      generatingRef.current = null;
+      setGenerating(null);
+      setInput(question);
+      setError('笔记草稿保存失败，请重试');
+      return;
+    }
 
     const port = browser.runtime.connect({ name: CHAT_PORT });
     portRef.current = port;
@@ -126,9 +139,13 @@ export default function ChatView(props: {
 
     port.onMessage.addListener((e: ChatPortEvent) => {
       switch (e.type) {
-        case 'context-ready':
+        case 'context-ready': {
+          // C2：context-ready 携带话题身份，立即切换（不等 answer-done 后的状态刷新）
+          const topicId = (e as { topicId?: string }).topicId;
+          if (topicId) setCurrentTopicId(topicId);
           setGenerating((g) => (g ? { ...g, stage: 'answering' } : g));
           break;
+        }
         case 'tool-start':
           setGenerating((g) =>
             g ? { ...g, stage: 'searching', searchProvider: e.provider } : g,
@@ -148,6 +165,7 @@ export default function ChatView(props: {
           );
           break;
         case 'answer-done':
+          generatingRef.current = null;
           setGenerating(null);
           stopPort();
           void reloadChatState();
@@ -165,6 +183,7 @@ export default function ChatView(props: {
           void reloadChatState();
           break;
         case 'error':
+          generatingRef.current = null;
           setGenerating(null);
           setError(e.message);
           stopPort();
@@ -174,6 +193,12 @@ export default function ChatView(props: {
     });
     port.onDisconnect.addListener(() => {
       portRef.current = null;
+      // 意外断开（Service Worker 重启等）：复位 generating，否则输入框永久 disabled
+      if (generatingRef.current) {
+        generatingRef.current = null;
+        setGenerating(null);
+        setError('连接中断，请重试');
+      }
     });
 
     port.postMessage({
@@ -196,7 +221,14 @@ export default function ChatView(props: {
   ) => {
     setBusyTurnId(turnId);
     try {
-      await browser.runtime.sendMessage({ type, turnId });
+      const resp = (await browser.runtime.sendMessage({ type, turnId })) as
+        | { ok?: boolean; error?: string }
+        | undefined;
+      // 后台明确拒绝（ok:false）→ 内联报错，不走成功路径
+      if (resp?.ok === false) {
+        setError(resp.error ?? '操作失败');
+        return;
+      }
       setToast(null);
       await reloadChatState();
     } catch {

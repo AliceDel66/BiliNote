@@ -29,6 +29,7 @@ import {
   updateProfile,
   type ModelProfile,
 } from '../../lib/storage';
+import { insecureHttpError, originPattern } from '../../lib/host-permissions';
 import ConnectorsSection from './ConnectorsSection';
 
 interface FormState {
@@ -70,11 +71,19 @@ function maskKey(key: string): string {
   return `${key.slice(0, 4)}****${key.slice(-4)}`;
 }
 
-function originPattern(baseURL: string): string | null {
+/**
+ * 确保 baseURL 对应域名的 host 权限（须在用户手势内调用）：
+ * 已授予 → true；用户拒绝或环境不支持 → false。URL 非法无法推导 pattern 时放行，
+ * 交给后续连接错误提示。
+ */
+async function ensureHostPermission(baseURL: string): Promise<boolean> {
+  const pattern = originPattern(baseURL);
+  if (!pattern) return true;
   try {
-    return `${new URL(baseURL).origin}/*`;
+    if (await browser.permissions.contains({ origins: [pattern] })) return true;
+    return await browser.permissions.request({ origins: [pattern] });
   } catch {
-    return null;
+    return false;
   }
 }
 
@@ -146,6 +155,11 @@ export default function App() {
     setBusy(true);
     setMessage(null);
     try {
+      // 先确保该域名的 host 权限，未授予则中止（不发起任何 API 调用）
+      if (!(await ensureHostPermission(form.baseURL.trim()))) {
+        setMessage({ kind: 'err', text: '未获得该域名访问权限，无法连接你的模型服务' });
+        return;
+      }
       const list = (await callBg({
         type: 'fetchModels',
         baseURL: form.baseURL,
@@ -171,6 +185,11 @@ export default function App() {
     setBusy(true);
     setMessage(null);
     try {
+      // 先确保该域名的 host 权限，未授予则中止（不发起任何 API 调用）
+      if (!(await ensureHostPermission(form.baseURL.trim()))) {
+        setMessage({ kind: 'err', text: '未获得该域名访问权限，无法连接你的模型服务' });
+        return;
+      }
       const { latencyMs } = (await callBg({
         type: 'testConnection',
         baseURL: form.baseURL,
@@ -190,9 +209,21 @@ export default function App() {
       setMessage({ kind: 'err', text: '请完整填写名称、baseURL、API Key 与默认模型' });
       return;
     }
+    // 明文 http:// 端点会泄露 Bearer Key 与课程内容：仅允许本机回环地址
+    const insecure = insecureHttpError(form.baseURL.trim());
+    if (insecure) {
+      setMessage({ kind: 'err', text: insecure });
+      return;
+    }
     setBusy(true);
     setMessage(null);
     try {
+      // 新增配置或编辑后 origin 变化时：先申请该域名 host 权限（用户手势内），
+      // 被拒绝则不保存
+      if (!(await ensureHostPermission(form.baseURL.trim()))) {
+        setMessage({ kind: 'err', text: '未获得该域名访问权限，无法保存配置' });
+        return;
+      }
       if (form.id) {
         await updateProfile(form.id, {
           name: form.name.trim(),
@@ -202,15 +233,6 @@ export default function App() {
           models,
         });
       } else {
-        // 新增配置：申请该端点的 host 权限（用户手势内）
-        const pattern = originPattern(form.baseURL.trim());
-        if (pattern) {
-          try {
-            await browser.permissions.request({ origins: [pattern] });
-          } catch {
-            /* 用户拒绝或环境不支持，仍可保存（分析时可能报网络错误） */
-          }
-        }
         await addProfile({
           name: form.name.trim(),
           baseURL: form.baseURL.trim(),
@@ -571,7 +593,7 @@ export default function App() {
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-3">
                 <p className="text-ink-2 dark:text-ink-2-dark">
-                  发送当前时间窗口字幕
+                  发送课程内容（字幕窗口 + 大纲/章节摘要）
                   <span className="block text-xs text-ink-3 dark:text-ink-3-dark">
                     关闭后课程内容不出本地，答疑按「无字幕」降级回答
                   </span>
@@ -579,7 +601,7 @@ export default function App() {
                 <Switch
                   checked={privSubtitles}
                   onChange={(v) => void onTogglePrivSubtitles(v)}
-                  aria-label="发送当前时间窗口字幕"
+                  aria-label="发送课程内容（字幕窗口 + 大纲/章节摘要）"
                 />
               </div>
               <div className="flex items-center justify-between gap-3">

@@ -3,3 +3,4 @@ export * from './chunk';
 export * from './prompts';
 export * from './pipeline';
 export * from './markdown';
+export * from './analysisIdentity';
