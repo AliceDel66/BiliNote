@@ -373,6 +373,17 @@ pnpm build
 
 当前实现按单文件 25MB 上限工作，不做切片。超长视频可能因最低码率音轨仍超限而无法转写；无 DASH 时还可能上传 MP4 混流。转写成功后只保存归一化文字与时间段，24 小时内复用，不保存媒体字节。Groq 免费额度、速率限制、价格和模型可用性可能变化，以其官网与 [Speech-to-Text 文档](https://console.groq.com/docs/speech-to-text)为准。
 
+#### 转写服务怎么选（按推荐排序）
+
+| 推荐 | baseURL / model | 适合谁 | 注意 |
+| --- | --- | --- | --- |
+| **首选 · Groq** | `https://api.groq.com/openai/v1` + `whisper-large-v3-turbo`（或 `whisper-large-v3`） | 想要「免费 + 全时间戳」的组合 | 原生 OpenAI 兼容，返回逐段时间戳（大纲时间跳转全可用）；有 Free tier；国内直连稳定性因网络而异，不通可走你信任的中转站 |
+| **国内直连首选 · 硅基流动** | `https://api.siliconflow.cn/v1` + `FunAudioLLM/SenseVoiceSmall` | Groq 连不上、追求中文识别质量 | 中文识别率顶尖且有免费额度；但当前以纯文本返回为主，无逐段时间戳时会降级为整段单条字幕——大纲/总结照常，**时间点跳转受限** |
+| **备选 · OpenAI** | `https://api.openai.com/v1` + `whisper-1` 或 `gpt-4o-mini-transcribe` | 已有 OpenAI 账号与可用网络 | 官方参考实现、时间戳齐全 |
+| **暂不兼容** | 讯飞（WebSocket 私有协议）、腾讯 ASR（私有协议）、阿里 paraformer（需先传 OSS 再异步任务） | — | 不是 OpenAI 兼容直传，当前版本装不进去 |
+
+你已有的 **MiniMax / Kimi / DeepSeek / 小米 token 不能用于语音转写**——它们都不提供 OpenAI 兼容的 `/audio/transcriptions` 端点（DeepSeek 纯文本；Kimi 的 Kimi-Audio 为开源自部署模型、平台无托管转写 API；MiniMax 公开 API 以 TTS 为主；小米无公开 STT API）。它们继续用作课程分析与答疑（Kimi 同时负责联网搜索）正合适；转写单独配一家即可。
+
 ### 连接 Obsidian 或本地 Markdown
 
 Bridge 需要 Node.js 20 或更高版本，只监听本机：
