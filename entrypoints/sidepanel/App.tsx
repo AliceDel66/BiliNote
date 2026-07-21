@@ -1,10 +1,11 @@
-/** Side Panel 主界面：课程 / 对话 / 笔记 三 Tab + 顶部 CourseContextBar（讨论稿 §6） */
+/** Side Panel 主界面：课程 / 对话 / 笔记 / 我的 四 Tab + 顶部 CourseContextBar（讨论稿 §6） */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { browser } from 'wxt/browser';
 import TimestampLink from '../../components/TimestampLink';
 import MarkdownPreview from '../../components/MarkdownPreview';
 import Tabs, { type TabItem } from '../../components/Tabs';
 import ChatView from './ChatView';
+import ProfileView from './ProfileView';
 import {
   Badge,
   Button,
@@ -58,12 +59,13 @@ type Status =
   | 'no-subtitle'
   | 'error';
 
-type TabKey = 'course' | 'chat' | 'notes';
+type TabKey = 'course' | 'chat' | 'notes' | 'profile';
 
 const TABS: TabItem<TabKey>[] = [
   { key: 'course', label: '课程' },
   { key: 'chat', label: '对话' },
   { key: 'notes', label: '笔记' },
+  { key: 'profile', label: '我的' },
 ];
 
 /** 上下文完整度徽章（讨论稿 §5.1 / §6 CourseContextBar） */
@@ -303,7 +305,7 @@ export default function App() {
 
   useEffect(() => () => void flushDraft(), [flushDraft]);
 
-  // ---- 三 Tab + AI Chat 状态 ----
+  // ---- 四 Tab + AI Chat 状态 ----
   const [activeTab, setActiveTab] = useState<TabKey>('course');
   const [chatState, setChatState] = useState<ChatStatePayload | null>(null);
   const [playbackTime, setPlaybackTime] = useState(0);
@@ -525,8 +527,8 @@ export default function App() {
 
         <Tabs tabs={TABS} active={activeTab} onChange={switchTab} />
 
-        {/* CourseContextBar（§6）：分 P + 播放时间 + 当前章节 + 上下文完整度 */}
-        {ctx && status !== 'no-video' && status !== 'loading' && (
+        {/* CourseContextBar（§6）：分 P + 播放时间 + 当前章节 + 上下文完整度；「我的」Tab 不显示 */}
+        {ctx && status !== 'no-video' && status !== 'loading' && activeTab !== 'profile' && (
           <div className="flex items-center gap-2 border-b border-line dark:border-line-dark bg-surface-2/60 dark:bg-surface-2-dark/60 px-4 py-2 text-xs text-ink-2 dark:text-ink-2-dark">
             <Badge tone="brand">P{ctx.p}</Badge>
             <span className="font-mono tnum">{formatTimestamp(playbackTime)}</span>
@@ -965,6 +967,11 @@ export default function App() {
             打开 B站视频播放页后，这里会显示当前课程的笔记。
           </p>
         )}
+        </div>
+
+        {/* ================= 我的 Tab ================= */}
+        <div className={activeTab === 'profile' ? 'space-y-4' : 'hidden'}>
+          <ProfileView visible={activeTab === 'profile'} />
         </div>
       </main>
     </div>
