@@ -8,6 +8,7 @@ import type {
   Completeness,
   ToolMode,
 } from './chat/types';
+import type { ConnectorProfile } from './connectors/types';
 
 export interface PageInfo {
   cid: number;
@@ -46,6 +47,9 @@ export type BgRequest =
   | { type: 'notionSearchPages'; query: string }
   | { type: 'notionSyncNote'; noteId: number; force?: boolean }
   | { type: 'notionSyncStatus'; noteId: number }
+  | { type: 'connectorTest'; profile: ConnectorProfile }
+  | { type: 'connectorList' }
+  | { type: 'connectorSyncStatus'; noteId: number }
   | { type: 'noteSaved'; noteId: number }
   | { type: 'chatGetState'; bvid: string; cid: number }
   | { type: 'chatUndo'; turnId: string }

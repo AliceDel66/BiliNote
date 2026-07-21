@@ -7,7 +7,7 @@ export interface UiPrefs {
   contextBudget: number;
   /** 分析时是否附带弹幕高光作为辅助上下文（PRD F-02） */
   includeDanmaku: boolean;
-  /** 笔记保存后是否自动同步到 Notion（PRD F-07） */
+  /** 笔记保存后是否自动同步到默认知识库（PRD F-07；目标 = 当前激活的知识库连接） */
   autoSyncNotion: boolean;
   /** AI Chat 完整回答后是否自动记录到课程笔记（讨论稿 §5.6，默认开） */
   chatAutoRecord: boolean;

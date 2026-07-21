@@ -252,7 +252,7 @@ export default function App() {
 
   const refreshSyncInfo = useCallback(async (noteId: number) => {
     try {
-      const resp = await browser.runtime.sendMessage({ type: 'notionSyncStatus', noteId });
+      const resp = await browser.runtime.sendMessage({ type: 'connectorSyncStatus', noteId });
       if (activeNoteIdRef.current === noteId) {
         setSyncInfo((resp?.data ?? null) as NotionMappingRow | null);
       }
@@ -915,7 +915,7 @@ export default function App() {
                       onClick={() => void syncNow(false)}
                     >
                       <CloudUploadIcon size={12} />
-                      {syncBusy ? '同步中…' : '同步到 Notion'}
+                      {syncBusy ? '同步中…' : '同步到知识库'}
                     </Button>
                     {syncInfo?.syncStatus === 'conflict' && (
                       <Button
@@ -923,7 +923,7 @@ export default function App() {
                         size="sm"
                         disabled={syncBusy}
                         onClick={() => void syncNow(true)}
-                        title="用本地内容覆盖 Notion 页面"
+                        title="用本地内容覆盖远端页面"
                       >
                         强制覆盖
                       </Button>

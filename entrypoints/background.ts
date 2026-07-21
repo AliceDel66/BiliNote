@@ -13,12 +13,16 @@ import {
   type VideoInfo,
 } from '../lib/bilibili';
 import { chatStream, fetchModels, testConnection, LLMError } from '../lib/llm';
+import { createNotionClient, NotionError } from '../lib/notion';
 import {
-  createNotionClient,
-  syncNoteToNotion,
-  NotionError,
-  type SyncStorage,
-} from '../lib/notion';
+  buildConnector,
+  getActiveConnectorProfile,
+  getTargetSyncRow,
+  listConnectorProfiles,
+  getActiveConnectorProfileId,
+  syncNoteToTarget,
+  type TargetSyncRow,
+} from '../lib/connectors';
 import {
   db,
   getCachedSubtitle,
@@ -35,12 +39,9 @@ import {
   getNote,
   getNotionConfig,
   getNotionMapping,
-  saveNotionMapping,
-  findCoursePageId,
-  markNoteSynced,
+  getLatestConnectorSync,
   type ModelProfile,
   type NoteRow,
-  type NotionMappingRow,
 } from '../lib/storage';
 import {
   appendQaBlock,
@@ -95,69 +96,32 @@ async function getActiveTabId(): Promise<number | null> {
   return tab?.id ?? null;
 }
 
-// ---------- Notion 同步（串行队列，PRD F-07 / 6.5） ----------
+// ---------- 知识库同步（串行队列，PRD F-07 / 6.5；路由到当前默认写入目标） ----------
 
-const notionSyncStorage: SyncStorage = {
-  getNote,
-  getVideo: async (bvid) => {
-    const v = await db.videos.get(bvid);
-    if (!v) return undefined;
-    return {
-      title: v.title,
-      pages: v.parts.map((p) => ({ cid: p.cid, page: p.page, part: p.part })),
-    };
-  },
-  getMapping: getNotionMapping,
-  saveMapping: saveNotionMapping,
-  findCoursePageId,
-  markNoteClean: markNoteSynced,
-};
-
-async function requireNotionReady(): Promise<{ token: string; rootPageId: string }> {
-  const config = await getNotionConfig();
-  if (!config?.token || !config.rootPageId) {
-    throw new Error('请先在设置页完成 Notion 集成配置（令牌 + 同步根页面）');
-  }
-  return { token: config.token, rootPageId: config.rootPageId };
-}
-
-async function doSyncNote(noteId: number, force?: boolean): Promise<NotionMappingRow> {
-  const { token, rootPageId } = await requireNotionReady();
-  const client = createNotionClient({ token });
-  return syncNoteToNotion({
-    client,
-    rootPageId,
-    noteId,
-    force,
-    storage: notionSyncStorage,
-  });
+async function doSyncNote(noteId: number, force?: boolean): Promise<TargetSyncRow> {
+  return syncNoteToTarget(noteId, { force });
 }
 
 // 所有同步任务经同一队列串行执行（配合客户端限流，避免突发请求打满 3 QPS）
 let syncChain: Promise<unknown> = Promise.resolve();
 
-function enqueueSync(noteId: number, force?: boolean): Promise<NotionMappingRow> {
+function enqueueSync(noteId: number, force?: boolean): Promise<TargetSyncRow> {
   const job = syncChain.then(() => doSyncNote(noteId, force));
   syncChain = job.catch(() => undefined);
   return job;
 }
 
-/** 笔记保存后的自动同步（prefs.autoSyncNotion，默认开） */
+/** 笔记保存后的自动同步（prefs.autoSyncNotion，默认开；目标 = 当前默认知识库连接） */
 async function maybeAutoSync(noteId: number): Promise<void> {
   const prefs = await getPrefs();
   if (!prefs.autoSyncNotion) return;
-  const config = await getNotionConfig();
-  if (!config?.token || !config.rootPageId) return; // 未配置 Notion：保持「未同步」
-  const existing = await getNotionMapping(noteId);
-  await saveNotionMapping({
-    ...(existing ?? {
-      noteId,
-      lastSyncedAt: 0,
-      notionLastEditedTime: '',
-    }),
-    syncStatus: 'pending',
-    error: undefined,
-  });
+  const profile = await getActiveConnectorProfile();
+  if (!profile) return; // 未配置任何连接：保持「未同步」
+  if (profile.kind === 'notion') {
+    // 保持旧行为：Notion 未完成令牌 + 根页面配置时静默跳过
+    const config = await getNotionConfig();
+    if (!config?.token || !config.rootPageId) return;
+  }
   await enqueueSync(noteId);
 }
 
@@ -656,6 +620,49 @@ export default defineBackground(() => {
           case 'notionSyncStatus': {
             const mapping = await getNotionMapping(msg.noteId);
             sendResponse({ ok: true, data: mapping ?? null });
+            return;
+          }
+          case 'connectorTest': {
+            const connector = buildConnector(msg.profile);
+            const result = await connector.testConnection();
+            sendResponse({ ok: true, data: result });
+            return;
+          }
+          case 'connectorList': {
+            const profiles = await listConnectorProfiles();
+            const activeId = (await getActiveConnectorProfileId()) ?? profiles[0]?.id;
+            const lastSync: Record<
+              string,
+              { syncStatus: string; lastSyncedAt: number; error?: string } | null
+            > = {};
+            for (const p of profiles) {
+              if (p.kind === 'notion') {
+                const rows = await db.notionMappings.toArray();
+                const latest = rows.sort((a, b) => b.lastSyncedAt - a.lastSyncedAt)[0];
+                lastSync[p.id] = latest
+                  ? {
+                      syncStatus: latest.syncStatus,
+                      lastSyncedAt: latest.lastSyncedAt,
+                      error: latest.error,
+                    }
+                  : null;
+              } else {
+                const latest = await getLatestConnectorSync(p.id);
+                lastSync[p.id] = latest
+                  ? {
+                      syncStatus: latest.syncStatus,
+                      lastSyncedAt: latest.lastSyncedAt,
+                      error: latest.error,
+                    }
+                  : null;
+              }
+            }
+            sendResponse({ ok: true, data: { profiles, activeId, lastSync } });
+            return;
+          }
+          case 'connectorSyncStatus': {
+            const row = await getTargetSyncRow(msg.noteId);
+            sendResponse({ ok: true, data: row ?? null });
             return;
           }
           case 'noteSaved': {

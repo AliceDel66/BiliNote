@@ -1,4 +1,4 @@
-/** 设置页：模型 Profile CRUD / Notion 集成 / 偏好开关 / 数据管理 */
+/** 设置页：模型 Profile CRUD / 知识库连接 / 偏好开关 / 数据管理 */
 import { useCallback, useEffect, useState } from 'react';
 import { browser } from 'wxt/browser';
 import {
@@ -11,7 +11,6 @@ import {
 } from '../../components/ui';
 import {
   CheckIcon,
-  CloudUploadIcon,
   DatabaseIcon,
   DownloadIcon,
   EyeIcon,
@@ -23,19 +22,14 @@ import {
 import {
   addProfile,
   db,
-  getNotionConfig,
   getPrefs,
   getProfiles,
-  patchNotionConfig,
-  clearNotionConfig,
   removeProfile,
-  saveNotionConfig,
   setPrefs,
   updateProfile,
   type ModelProfile,
-  type NotionConfig,
 } from '../../lib/storage';
-import type { NotionPageSummary } from '../../lib/notion';
+import ConnectorsSection from './ConnectorsSection';
 
 interface FormState {
   id: string | null;
@@ -43,6 +37,24 @@ interface FormState {
   baseURL: string;
   apiKey: string;
   defaultModel: string;
+}
+
+/** 设置分组锚点导航（左侧 sticky） */
+const SECTIONS = [
+  { id: 'sec-model', label: '模型服务' },
+  { id: 'sec-connectors', label: '知识库连接' },
+  { id: 'sec-enhance', label: '分析增强' },
+  { id: 'sec-chat', label: 'AI 答疑' },
+  { id: 'sec-privacy', label: '数据边界' },
+  { id: 'sec-data', label: '数据管理' },
+] as const;
+
+function navItemClass(active: boolean): string {
+  return `block rounded-lg border-l-[3px] px-3 py-2 text-[13px] transition-colors duration-150 ${
+    active
+      ? 'border-brand-500 bg-brand-soft dark:bg-brand-soft-dark text-brand-600 dark:text-brand-300 font-medium'
+      : 'border-transparent text-ink-2 dark:text-ink-2-dark hover:bg-surface-2 dark:hover:bg-surface-2-dark hover:text-ink dark:hover:text-ink-dark'
+  }`;
 }
 
 const EMPTY_FORM: FormState = {
@@ -74,16 +86,7 @@ export default function App() {
   const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // ---- Notion 集成（内部集成令牌，F-07）----
-  const [notionCfg, setNotionCfg] = useState<NotionConfig | null>(null);
-  const [tokenInput, setTokenInput] = useState('');
-  const [notionMsg, setNotionMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
-  const [notionBusy, setNotionBusy] = useState(false);
-  const [rootQuery, setRootQuery] = useState('');
-  const [rootResults, setRootResults] = useState<NotionPageSummary[]>([]);
-
   // ---- 偏好开关 ----
-  const [autoSync, setAutoSync] = useState(true);
   const [danmaku, setDanmaku] = useState(false);
   const [chatAutoRecord, setChatAutoRecord] = useState(true);
   // 数据边界（ABC 混合 · C 逐项开关，默认全开 = 最小暴露基线）
@@ -92,18 +95,38 @@ export default function App() {
   const [privMeta, setPrivMeta] = useState(true);
 
   const [dataBusy, setDataBusy] = useState(false);
+  const [activeSection, setActiveSection] = useState<string>(SECTIONS[0].id);
+
+  // 滚动随动高亮当前设置分组
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) setActiveSection(e.target.id);
+        }
+      },
+      { rootMargin: '-20% 0px -65% 0px' },
+    );
+    for (const s of SECTIONS) {
+      const el = document.getElementById(s.id);
+      if (el) observer.observe(el);
+    }
+    return () => observer.disconnect();
+  }, []);
+
+  const scrollToSection = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 
   const reload = useCallback(async () => {
-    const [p, prefs, notion] = await Promise.all([getProfiles(), getPrefs(), getNotionConfig()]);
+    const [p, prefs] = await Promise.all([getProfiles(), getPrefs()]);
     setProfiles(p);
     setActiveId(prefs.activeProfileId ?? p[0]?.id);
-    setAutoSync(prefs.autoSyncNotion);
     setDanmaku(prefs.includeDanmaku);
     setChatAutoRecord(prefs.chatAutoRecord);
     setPrivSubtitles(prefs.privacySendSubtitles);
     setPrivNote(prefs.privacySendNoteExcerpt);
     setPrivMeta(prefs.privacySendPlaybackMeta);
-    setNotionCfg(notion);
   }, []);
 
   useEffect(() => {
@@ -230,83 +253,7 @@ export default function App() {
     setActiveId(id);
   };
 
-  // ---- Notion 集成 ----
-
-  /** 保存令牌：先在用户手势内申请 api.notion.com 权限，再经 background 验证 */
-  const onSaveToken = async () => {
-    const token = tokenInput.trim();
-    if (!token) return;
-    setNotionBusy(true);
-    setNotionMsg(null);
-    try {
-      try {
-        await browser.permissions.request({ origins: ['https://api.notion.com/*'] });
-      } catch {
-        /* 用户拒绝授权：下面的验证请求会失败并提示 */
-      }
-      const info = (await callBg({ type: 'notionValidateToken', token })) as {
-        botName: string;
-        workspaceName?: string;
-      };
-      await saveNotionConfig({ token, botName: info.botName });
-      setNotionCfg(await getNotionConfig());
-      setTokenInput('');
-      setNotionMsg({
-        kind: 'ok',
-        text: `令牌有效，已连接集成「${info.botName}」${info.workspaceName ? `（工作区：${info.workspaceName}）` : ''}。请再到 Notion 把目标页面共享给该集成。`,
-      });
-    } catch (e) {
-      setNotionMsg({ kind: 'err', text: `验证失败：${(e as Error).message}` });
-    } finally {
-      setNotionBusy(false);
-    }
-  };
-
-  const onClearToken = async () => {
-    if (!confirm('确定移除 Notion 集成配置？已同步的页面不受影响。')) return;
-    await clearNotionConfig();
-    setNotionCfg(null);
-    setRootResults([]);
-    setNotionMsg(null);
-  };
-
-  const onSearchPages = async () => {
-    setNotionBusy(true);
-    setNotionMsg(null);
-    try {
-      const pages = (await callBg({
-        type: 'notionSearchPages',
-        query: rootQuery.trim(),
-      })) as NotionPageSummary[];
-      setRootResults(pages);
-      if (pages.length === 0) {
-        setNotionMsg({
-          kind: 'err',
-          text: '没有找到页面。请确认目标页面已在 Notion 中共享给你的集成（页面右上角 ··· → 连接 → 选择集成）。',
-        });
-      }
-    } catch (e) {
-      setNotionMsg({ kind: 'err', text: `搜索失败：${(e as Error).message}` });
-    } finally {
-      setNotionBusy(false);
-    }
-  };
-
-  const onPickRoot = async (page: NotionPageSummary) => {
-    const next = await patchNotionConfig({
-      rootPageId: page.id,
-      rootPageTitle: page.title || '（无标题页面）',
-    });
-    setNotionCfg(next);
-    setNotionMsg({ kind: 'ok', text: `同步根页面已设为「${page.title || '（无标题页面）'}」` });
-  };
-
   // ---- 偏好开关 ----
-
-  const onToggleAutoSync = async (v: boolean) => {
-    setAutoSync(v);
-    await setPrefs({ autoSyncNotion: v });
-  };
 
   const onToggleDanmaku = async (v: boolean) => {
     setDanmaku(v);
@@ -337,7 +284,7 @@ export default function App() {
   const onExport = async () => {
     setDataBusy(true);
     try {
-      const [videos, subtitles, summaries, notes, noteVersions, notionMappings, chatSessions, chatTopics, chatTurns, prefs] =
+      const [videos, subtitles, summaries, notes, noteVersions, notionMappings, chatSessions, chatTopics, chatTurns, connectorSync, prefs] =
         await Promise.all([
           db.videos.toArray(),
           db.subtitles.toArray(),
@@ -348,12 +295,13 @@ export default function App() {
           db.chatSessions.toArray(),
           db.chatTopics.toArray(),
           db.chatTurns.toArray(),
+          db.connectorSync.toArray(),
           getPrefs(),
         ]);
       const payload = {
         app: 'bilinote',
         exportedAt: new Date().toISOString(),
-        tables: { videos, subtitles, summaries, notes, noteVersions, notionMappings, chatSessions, chatTopics, chatTurns },
+        tables: { videos, subtitles, summaries, notes, noteVersions, notionMappings, chatSessions, chatTopics, chatTurns, connectorSync },
         prefs,
       };
       const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -371,7 +319,7 @@ export default function App() {
   };
 
   const onClearAll = async () => {
-    if (!confirm('确定清空全部本地数据？包括笔记、分析缓存、模型配置与 Notion 令牌。')) return;
+    if (!confirm('确定清空全部本地数据？包括笔记、分析缓存、模型配置与知识库连接凭据。')) return;
     if (!confirm('此操作不可恢复，请再次确认。')) return;
     setDataBusy(true);
     try {
@@ -386,19 +334,41 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-page dark:bg-page-dark text-ink dark:text-ink-dark text-[13px]">
-      <main className="mx-auto max-w-2xl p-6 space-y-8">
-        <header className="space-y-2">
-          <div className="flex items-center gap-2">
-            <img src="/icon/128.png" alt="BiliNote" className="h-5 w-5 rounded-[6px]" />
-            <span className="text-[15px] font-semibold tracking-tight">BiliNote</span>
+      <div className="mx-auto max-w-5xl px-8 py-8">
+        <header className="border-b border-line dark:border-line-dark pb-6">
+          <div className="flex items-center gap-3">
+            <img src="/icon/128.png" alt="BiliNote" className="h-8 w-8 rounded-[8px]" />
+            <div>
+              <h1 className="text-[20px] font-semibold leading-tight tracking-tight">设置</h1>
+              <p className="mt-0.5 text-xs text-ink-2 dark:text-ink-2-dark">
+                模型服务配置（BYOK）· 本地优先 · API Key 仅保存在本地（chrome.storage.local），不会同步也不会上传
+              </p>
+            </div>
           </div>
-          <h1 className="text-[17px] font-semibold tracking-tight">设置</h1>
-          <p className="text-sm text-ink-2 dark:text-ink-2-dark">
-            模型服务配置（BYOK）。API Key 仅保存在本地（chrome.storage.local），不会同步也不会上传。
-          </p>
         </header>
 
-        <section className="space-y-3">
+        <div className="mt-8 flex gap-10">
+          {/* 左侧锚点导航（sticky，滚动随动高亮） */}
+          <aside className="sticky top-8 hidden w-[180px] shrink-0 self-start md:block">
+            <nav className="space-y-0.5">
+              {SECTIONS.map((s) => (
+                <a
+                  key={s.id}
+                  href={`#${s.id}`}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    scrollToSection(s.id);
+                  }}
+                  className={navItemClass(activeSection === s.id)}
+                >
+                  {s.label}
+                </a>
+              ))}
+            </nav>
+          </aside>
+
+          <main className="min-w-0 max-w-2xl flex-1 space-y-6">
+        <section id="sec-model" className="space-y-6 scroll-mt-8">
           <Card>
             <SectionTitle icon={<DatabaseIcon />} title="已保存的配置" />
             {profiles.length === 0 && (
@@ -446,9 +416,6 @@ export default function App() {
               ))}
             </ul>
           </Card>
-        </section>
-
-        <section className="space-y-3">
           <Card>
             <SectionTitle
               icon={<PlusIcon />}
@@ -558,146 +525,11 @@ export default function App() {
           </p>
         </section>
 
-        <section className="space-y-3">
-          <Card>
-            <SectionTitle icon={<CloudUploadIcon />} title="Notion 集成" />
-            <div className="space-y-3">
-              <p className="text-xs text-ink-2 dark:text-ink-2-dark">
-                在 notion.so/my-integrations 创建「内部集成」并复制令牌；然后在 Notion
-                中把目标页面「共享 / 连接」给该集成。令牌仅保存在本地（chrome.storage.local）。
-              </p>
-
-              {notionCfg ? (
-                <div className="flex items-center justify-between gap-3">
-                  <p className="flex min-w-0 items-center gap-2">
-                    <Badge tone="success" className="shrink-0">
-                      已连接集成「{notionCfg.botName || '未命名'}」
-                    </Badge>
-                    <span className="font-mono text-xs tnum text-ink-2 dark:text-ink-2-dark">
-                      {maskKey(notionCfg.token)}
-                    </span>
-                  </p>
-                  <Button
-                    variant="dangerGhost"
-                    size="sm"
-                    onClick={() => void onClearToken()}
-                    className="shrink-0"
-                  >
-                    移除集成
-                  </Button>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <label className="block text-xs font-medium text-ink-2 dark:text-ink-2-dark">
-                    内部集成令牌
-                    <Input
-                      className="mt-1 font-mono"
-                      type="password"
-                      placeholder="ntn_... 或 secret_..."
-                      value={tokenInput}
-                      onChange={(e) => setTokenInput(e.target.value)}
-                    />
-                  </label>
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    disabled={notionBusy || !tokenInput.trim()}
-                    onClick={() => void onSaveToken()}
-                  >
-                    {notionBusy ? '验证中…' : '保存并验证'}
-                  </Button>
-                </div>
-              )}
-
-              {notionCfg && (
-                <div className="space-y-2 border-t border-line dark:border-line-dark pt-3">
-                  <p>
-                    同步根页面：
-                    {notionCfg.rootPageTitle ? (
-                      <span className="text-brand-600 dark:text-brand-300">
-                        {notionCfg.rootPageTitle}
-                      </span>
-                    ) : (
-                      <span className="text-amber-600 dark:text-amber-400">
-                        未选择（同步前请先选择）
-                      </span>
-                    )}
-                  </p>
-                  <div className="flex gap-2">
-                    <Input
-                      className="flex-1"
-                      placeholder="输入页面标题搜索（需已共享给集成）"
-                      value={rootQuery}
-                      onChange={(e) => setRootQuery(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') void onSearchPages();
-                      }}
-                    />
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={notionBusy}
-                      onClick={() => void onSearchPages()}
-                      className="h-9"
-                    >
-                      搜索页面
-                    </Button>
-                  </div>
-                  {rootResults.length > 0 && (
-                    <ul className="space-y-1">
-                      {rootResults.map((p) => (
-                        <li
-                          key={p.id}
-                          onClick={() => void onPickRoot(p)}
-                          className={`flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-xs cursor-pointer transition-colors hover:bg-surface-2 dark:hover:bg-surface-2-dark ${
-                            notionCfg.rootPageId === p.id ? 'ring-1 ring-brand-500' : ''
-                          }`}
-                        >
-                          <span className="flex-1 min-w-0 truncate">
-                            {p.title || '（无标题页面）'}
-                          </span>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void onPickRoot(p);
-                            }}
-                          >
-                            设为根页面
-                          </Button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-
-                  <div className="flex items-center justify-between gap-3 pt-1">
-                    <span>笔记保存后自动同步到 Notion</span>
-                    <Switch
-                      checked={autoSync}
-                      onChange={(v) => void onToggleAutoSync(v)}
-                      aria-label="笔记保存后自动同步到 Notion"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {notionMsg && (
-                <p
-                  className={`text-xs ${
-                    notionMsg.kind === 'ok'
-                      ? 'text-emerald-600 dark:text-emerald-400'
-                      : 'text-red-600 dark:text-red-400'
-                  }`}
-                >
-                  {notionMsg.text}
-                </p>
-              )}
-            </div>
-          </Card>
+        <section id="sec-connectors" className="scroll-mt-8">
+          <ConnectorsSection />
         </section>
 
-        <section className="space-y-3">
+        <section id="sec-enhance" className="scroll-mt-8">
           <Card>
             <SectionTitle icon={<ZapIcon />} title="分析增强" />
             <div className="flex items-center justify-between gap-3">
@@ -713,7 +545,7 @@ export default function App() {
           </Card>
         </section>
 
-        <section className="space-y-3">
+        <section id="sec-chat" className="scroll-mt-8">
           <Card>
             <SectionTitle icon={<SparklesIcon />} title="AI 答疑" />
             <div className="flex items-center justify-between gap-3">
@@ -729,7 +561,7 @@ export default function App() {
           </Card>
         </section>
 
-        <section className="space-y-3">
+        <section id="sec-privacy" className="scroll-mt-8">
           <Card>
             <SectionTitle icon={<EyeIcon />} title="数据边界" />
             <p className="mb-3 text-xs text-ink-2 dark:text-ink-2-dark">
@@ -780,7 +612,7 @@ export default function App() {
           </Card>
         </section>
 
-        <section className="space-y-3">
+        <section id="sec-data" className="scroll-mt-8">
           <Card>
             <SectionTitle icon={<DownloadIcon />} title="数据管理" />
             <div className="space-y-3">
@@ -805,13 +637,15 @@ export default function App() {
               </div>
               <p className="text-xs text-ink-2 dark:text-ink-2-dark">
                 导出为 JSON（视频 / 字幕缓存 / 总结 / 笔记 / 问答会话 /
-                同步映射与偏好），不包含 API Key 与 Notion
-                令牌。清空操作需二次确认且不可恢复。
+                同步映射与偏好），不包含 API Key 与知识库连接凭据（Notion 令牌 /
+                MCP Token 等）。清空操作需二次确认且不可恢复。
               </p>
             </div>
           </Card>
         </section>
-      </main>
+          </main>
+        </div>
+      </div>
     </div>
   );
 }

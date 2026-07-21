@@ -59,6 +59,7 @@ export interface NoteVersionRow {
   createdAt: number;
 }
 
+/** Notion 专用同步状态（含 conflict）；其他连接器无冲突检测（last-write-wins） */
 export type NotionSyncStatus = 'pending' | 'syncing' | 'synced' | 'error' | 'conflict';
 
 /** 本地笔记 ↔ Notion 页面树映射（PRD 6.3 / F-07） */
@@ -87,6 +88,7 @@ export const db = new Dexie('bilinote') as Dexie & {
   chatSessions: EntityTable<ChatSession, 'id'>;
   chatTopics: EntityTable<ChatTopic, 'id'>;
   chatTurns: EntityTable<ChatTurn, 'id'>;
+  connectorSync: EntityTable<ConnectorSyncRow, 'id'>;
 };
 
 db.version(1).stores({
@@ -232,6 +234,7 @@ export async function deleteNote(id: number): Promise<void> {
   await db.notes.delete(id);
   await db.noteVersions.where('noteId').equals(id).delete();
   await db.notionMappings.where('noteId').equals(id).delete();
+  await db.connectorSync.where('noteId').equals(id).delete();
 }
 
 /** 同步成功后清除 dirty 标记 */
@@ -253,6 +256,56 @@ export async function saveNotionMapping(row: NotionMappingRow): Promise<void> {
   } else {
     await db.notionMappings.add(row);
   }
+}
+
+/** 非 Notion 连接器的同步状态（无 conflict：last-write-wins，§2.1 不承诺双向同步） */
+export type ConnectorSyncStatus = 'pending' | 'syncing' | 'synced' | 'error';
+
+/** 本地笔记 ↔ 非 Notion 连接器外部文档映射（知识连接 v1，讨论稿 §2） */
+export interface ConnectorSyncRow {
+  id?: number;
+  noteId: number;
+  /** ConnectorProfile.id */
+  connectorId: string;
+  /** 外部文档 id（MCP 返回的 pageId/docId，或 bridge 文件相对路径） */
+  externalId: string;
+  lastSyncedAt: number;
+  syncStatus: ConnectorSyncStatus;
+  error?: string;
+}
+
+// v4：新增知识连接器同步映射（纯加表，无数据迁移）。
+// connectorSync 按 (noteId, connectorId) 逻辑唯一（见 saveConnectorSync）。
+db.version(4).stores({
+  connectorSync: '++id, noteId, connectorId',
+});
+
+// ---------- 知识连接器同步映射 ----------
+
+export async function getConnectorSync(
+  noteId: number,
+  connectorId?: string,
+): Promise<ConnectorSyncRow | undefined> {
+  const rows = await db.connectorSync.where('noteId').equals(noteId).toArray();
+  return connectorId ? rows.find((r) => r.connectorId === connectorId) : rows[0];
+}
+
+export async function saveConnectorSync(row: ConnectorSyncRow): Promise<void> {
+  const existing = await getConnectorSync(row.noteId, row.connectorId);
+  const { id: _omit, ...changes } = row;
+  if (existing) {
+    await db.connectorSync.update(existing.id!, changes);
+  } else {
+    await db.connectorSync.add(row);
+  }
+}
+
+/** 指定连接器最近一次同步记录（设置页「上次同步状态」用） */
+export async function getLatestConnectorSync(
+  connectorId: string,
+): Promise<ConnectorSyncRow | undefined> {
+  const rows = await db.connectorSync.where('connectorId').equals(connectorId).toArray();
+  return rows.sort((a, b) => b.lastSyncedAt - a.lastSyncedAt)[0];
 }
 
 /** 同视频其他笔记已建过的课程页 id（避免每个分 P 各建一棵课程页） */
