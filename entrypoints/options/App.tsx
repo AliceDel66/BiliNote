@@ -31,6 +31,7 @@ import {
   setPrefs,
   updateProfile,
   type ModelProfile,
+  type SttConfig,
 } from '../../lib/storage';
 import { isSttConfig } from '../../lib/transcribe';
 import { insecureHttpError, originPattern } from '../../lib/host-permissions';
@@ -113,6 +114,8 @@ export default function App() {
 
   // ---- 语音转写（STT，Beta）----
   const [sttForm, setSttForm] = useState({ baseURL: '', apiKey: '', model: '' });
+  /** 已保存的语音转写配置（在「已保存的配置」列表中展示） */
+  const [savedStt, setSavedStt] = useState<SttConfig | null>(null);
   const [sttMessage, setSttMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [sttBusy, setSttBusy] = useState(false);
 
@@ -147,6 +150,7 @@ export default function App() {
     setPrivNote(prefs.privacySendNoteExcerpt);
     setPrivMeta(prefs.privacySendPlaybackMeta);
     if (stt) setSttForm(stt);
+    setSavedStt(stt ?? null);
   }, []);
 
   useEffect(() => {
@@ -366,6 +370,11 @@ export default function App() {
         apiKey: sttForm.apiKey.trim(),
         model: sttForm.model.trim(),
       });
+      setSavedStt({
+        baseURL: sttForm.baseURL.trim(),
+        apiKey: sttForm.apiKey.trim(),
+        model: sttForm.model.trim(),
+      });
       setSttMessage({ kind: 'ok', text: '已保存' });
     } catch (e) {
       setSttMessage({ kind: 'err', text: `保存失败：${(e as Error).message}` });
@@ -377,6 +386,7 @@ export default function App() {
   const onSttClear = async () => {
     await clearSttConfig();
     setSttForm({ baseURL: '', apiKey: '', model: '' });
+    setSavedStt(null);
     setSttMessage({ kind: 'ok', text: '已清除语音转写配置' });
   };
 
@@ -472,7 +482,7 @@ export default function App() {
         <section id="sec-model" className="space-y-6 scroll-mt-8">
           <Card>
             <SectionTitle icon={<DatabaseIcon />} title="已保存的配置" />
-            {profiles.length === 0 && (
+            {profiles.length === 0 && !savedStt && (
               <p className="text-sm text-ink-2 dark:text-ink-2-dark">
                 还没有配置，请在下方新增。
               </p>
@@ -515,6 +525,25 @@ export default function App() {
                   </button>
                 </li>
               ))}
+              {savedStt && (
+                <li className="flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors hover:bg-surface-2 dark:hover:bg-surface-2-dark">
+                  <span className="h-4 w-4 shrink-0" aria-hidden />
+                  <div className="flex-1 min-w-0">
+                    <p className="flex items-center gap-2 font-medium">
+                      <span className="truncate">语音转写</span>
+                      <Badge tone="neutral">STT</Badge>
+                    </p>
+                    <p className="mt-0.5 truncate text-xs text-ink-2 dark:text-ink-2-dark">
+                      {savedStt.baseURL} ·{' '}
+                      <span className="font-mono tnum">{maskKey(savedStt.apiKey)}</span> · 模型{' '}
+                      {savedStt.model}
+                    </p>
+                  </div>
+                  <Button variant="link" size="sm" onClick={() => scrollToSection('sec-stt')}>
+                    编辑
+                  </Button>
+                </li>
+              )}
             </ul>
           </Card>
           <Card>

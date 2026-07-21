@@ -676,6 +676,34 @@ export default defineBackground(() => {
     ?.setPanelBehavior({ openPanelOnActionClick: true })
     ?.catch(() => {});
 
+  // bilivideo CDN 防盗链要求 Referer，而 SW fetch 无法设置该禁改头（会被静默丢弃 → 403），
+  // 用 declarativeNetRequest 动态规则补 Referer（语音转写音轨下载依赖）
+  void browser.declarativeNetRequest
+    .updateDynamicRules({
+      removeRuleIds: [1001],
+      addRules: [
+        {
+          id: 1001,
+          priority: 1,
+          action: {
+            type: 'modifyHeaders' as const,
+            requestHeaders: [
+              {
+                header: 'Referer',
+                operation: 'set' as const,
+                value: 'https://www.bilibili.com',
+              },
+            ],
+          },
+          condition: {
+            urlFilter: '||bilivideo.com',
+            resourceTypes: ['xmlhttprequest' as const],
+          },
+        },
+      ],
+    })
+    .catch((e) => console.warn('[bilinote] DNR 注册失败', e));
+
   // P2：同步防抖/队列只在内存 —— SW 重启后恢复：syncing 归位 pending，pending/error 重新入队
   void rehydrateSyncQueue().catch(() => {});
 
